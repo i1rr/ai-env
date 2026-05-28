@@ -71,7 +71,7 @@ ai-env/
 7. ✅ Add unit tests for config loading and generation.
 8. ✅ Add unit tests for stack detection.
 9. ✅ Add unit tests for `.gitignore` entry generation.
-10. Add GitHub Actions CI workflow:
+10. ✅ Add GitHub Actions CI workflow:
     - `go test ./...`
     - `go vet ./...`
     - `staticcheck`
