@@ -37,6 +37,7 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(newNewCmd())
 	root.AddCommand(newListCmd())
 	root.AddCommand(newDiffCmd())
+	root.AddCommand(newPatchCmd())
 
 	return root
 }
@@ -114,5 +115,37 @@ func newDiffCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().Bool("name-only", false, "Print only the per-file summary; suppress the unified-diff body")
+	return cmd
+}
+
+// newPatchCmd builds the `ai-env patch` subcommand. Flag parsing happens
+// here; the actual export logic lives in internal/cli so it can be tested
+// without involving Cobra.
+func newPatchCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "patch <env-name> --out <file>",
+		Short: "Export an ai-env workspace's changes as a unified-diff patch",
+		Long: "Export the diff between an ai-env workspace and its baseline as " +
+			"a unified-diff patch file. For worktree-strategy envs this is the " +
+			"git diff between the env branch and the source repo's HEAD; for " +
+			"copy-strategy envs it is a file-level unified diff against the " +
+			"read-only baseline snapshot. Protected-path changes do not block " +
+			"export but trigger a warning so reviewers see them.",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			outPath, err := cmd.Flags().GetString("out")
+			if err != nil {
+				return fmt.Errorf("ai-env patch: read --out: %w", err)
+			}
+			return cli.RunPatch(cli.PatchOptions{
+				EnvName:    args[0],
+				OutputPath: outPath,
+				Stdout:     cmd.OutOrStdout(),
+				Stderr:     cmd.ErrOrStderr(),
+			})
+		},
+	}
+	cmd.Flags().String("out", "", "Path to write the unified-diff patch to (required)")
+	_ = cmd.MarkFlagRequired("out")
 	return cmd
 }
