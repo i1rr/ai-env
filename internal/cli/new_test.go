@@ -404,6 +404,12 @@ func TestRunNew_GitignoreIntegration(t *testing.T) {
 	if err := os.WriteFile(gi, []byte("node_modules/\n"), 0o644); err != nil {
 		t.Fatalf("seed .gitignore: %v", err)
 	}
+	// RunNew now materializes a workspace as part of plan 02 step 8.
+	// For non-Git sources that means CreateCopy leaves a read-only
+	// baseline behind. Restore write bits so t.TempDir's cleanup can
+	// remove the tree on macOS (where unlink-on-read-only-dir fails).
+	t.Cleanup(func() { restoreWriteBits(filepath.Join(dir, ".ai-env")) })
+
 	if err := RunNew(NewOptions{EnvName: "demo", Cwd: dir, Stdout: &bytes.Buffer{}}); err != nil {
 		t.Fatalf("RunNew: %v", err)
 	}
@@ -416,6 +422,22 @@ func TestRunNew_GitignoreIntegration(t *testing.T) {
 			t.Errorf("RunNew did not propagate gitignore entry %q; file:\n%s", entry, data)
 		}
 	}
+}
+
+// restoreWriteBits walks root and re-adds write bits to every directory
+// and file under it. CreateCopy leaves the baseline tree read-only
+// (mode 0o555/0o444), which is the production behavior; this helper
+// reverses that just enough to let t.TempDir's recursive cleanup unlink
+// the children. It is best-effort: walk errors are swallowed because the
+// only consumer is test cleanup, which never propagates errors anyway.
+func restoreWriteBits(root string) {
+	_ = filepath.Walk(root, func(p string, fi os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		_ = os.Chmod(p, 0o755)
+		return nil
+	})
 }
 
 // sameStringSet compares two []string for equality ignoring order.

@@ -246,6 +246,17 @@ func copyTree(src, dst string, readOnly bool) error {
 			return fmt.Errorf("readdir %s: %w", src, err)
 		}
 		for _, entry := range entries {
+			// Skip ai-env's own metadata directory and any nested Git
+			// repository administrative directory. Including them would
+			// cause self-referential copies when the source IS the project
+			// root (e.g. `ai-env new <name>` with no --from on a non-Git
+			// tree) and would also pollute the baseline with bookkeeping
+			// the workspace strategy must not depend on. The names are
+			// matched directly because both are conventional, single-
+			// component directory names; we do not need a pattern matcher.
+			if skipCopyEntry(entry.Name()) {
+				continue
+			}
 			if err := copyTree(filepath.Join(src, entry.Name()), filepath.Join(dst, entry.Name()), readOnly); err != nil {
 				return err
 			}
@@ -267,6 +278,24 @@ func copyTree(src, dst string, readOnly bool) error {
 		// privileges we deliberately do not assume.
 		return nil
 	}
+}
+
+// skipCopyEntry reports whether a directory entry with the given basename
+// should be skipped during a recursive workspace copy. The two names are:
+//
+//   - ".ai-env": ai-env's own metadata directory. Copying it into a
+//     workspace would loop forever when source==project root (the
+//     destination workspace lives under .ai-env/workspaces/), and the
+//     workspace must never depend on the host's metadata anyway.
+//   - ".git": the Git administrative directory. The copy strategy is for
+//     non-Git sources by contract; if a .git happens to be present it
+//     belongs to bookkeeping the workspace is not allowed to mutate.
+//
+// Other dot-directories (e.g. ".vscode", ".idea") are intentionally NOT
+// skipped: they are part of the user's source tree and the agent may need
+// to read them.
+func skipCopyEntry(name string) bool {
+	return name == ".ai-env" || name == ".git"
 }
 
 // copyFile copies the regular file at src to dst, preserving its content

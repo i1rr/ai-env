@@ -13,10 +13,12 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
 	"github.com/rivan1986/ai-env/internal/config"
+	"github.com/rivan1986/ai-env/internal/workspace"
 )
 
 // NewOptions captures the parsed flags + positional argument for `ai-env new`.
@@ -103,6 +105,11 @@ func RunNew(opts NewOptions) error {
 		return fmt.Errorf("ai-env new: %w", err)
 	}
 
+	// DetectWorkspaceStrategy is the label-only helper retained from
+	// plan 01; the real strategy decision and workspace materialization
+	// happen below via the workspace package. We still call it here so
+	// the printed summary continues to advertise the strategy even when
+	// the workspace already exists and materialization is skipped.
 	strategy := DetectWorkspaceStrategy(source)
 	template := DetectStack(source)
 
@@ -152,6 +159,16 @@ func RunNew(opts NewOptions) error {
 	}
 	written = append(written, secretsLocalPath)
 
+	// Materialize the workspace through the workspace package (plan 02
+	// step 8: "Update ai-env new to call WorkspaceManager.Create"). The
+	// strategy choice mirrors DetectWorkspaceStrategy: worktree when the
+	// source is a Git working tree, copy otherwise. The workspace lives
+	// at .ai-env/workspaces/<env-name>/ regardless of strategy.
+	wsResult, err := materializeWorkspace(aiEnvDir, opts.EnvName, source, template, time.Now())
+	if err != nil {
+		return fmt.Errorf("ai-env new: %w", err)
+	}
+
 	// .gitignore update is best-effort: if the source dir has one we
 	// extend it; if not we print suggested entries.
 	giResult := updateGitignore(source.Path)
@@ -165,9 +182,91 @@ func RunNew(opts NewOptions) error {
 		template:       template,
 		writtenFiles:   written,
 		gitignoreState: giResult,
+		workspace:      wsResult,
 	})
 
 	return nil
+}
+
+// workspaceResult records what materializeWorkspace did, for the printed
+// summary. It is the value type the new-command body and printSummary
+// share; the workspace package's WorkspaceInfo is not used directly here
+// because the summary also needs to convey the "already existed, skipped"
+// case which has no corresponding WorkspaceInfo.
+type workspaceResult struct {
+	// Path is the absolute path of the workspace directory. Set in both
+	// the materialized and skipped cases so the summary can always show
+	// where the workspace lives.
+	Path string
+
+	// Strategy is the strategy backing the workspace, as a string label
+	// ("worktree" or "copy"). Mirrors DetectWorkspaceStrategy.
+	Strategy string
+
+	// Branch is the Git branch the worktree is checked out on. Empty for
+	// copy strategy and for the skipped case.
+	Branch string
+
+	// Materialized reports whether this run actually created the
+	// workspace. False means a workspace with this name was already on
+	// disk and we left it alone (the --force case).
+	Materialized bool
+}
+
+// materializeWorkspace creates a worktree- or copy-backed workspace for
+// envName under aiEnvDir using the workspace package. It is the single
+// place ai-env new decides between the two strategies; downstream commands
+// (diff, patch, list) read the same metadata file the workspace package
+// wrote here.
+//
+// If a workspace already exists at the target path (for example because
+// the user is re-running with --force to refresh configs), materialize
+// leaves it alone and returns a workspaceResult with Materialized=false.
+// This keeps --force focused on configuration overwrite without forcing
+// the user to also lose any agent work already done in the existing
+// workspace.
+func materializeWorkspace(
+	aiEnvDir, envName string,
+	source Source,
+	template string,
+	now time.Time,
+) (workspaceResult, error) {
+	wsPath := workspace.WorkspacePath(aiEnvDir, envName)
+	if _, err := os.Stat(wsPath); err == nil {
+		// Workspace already exists; surface its location without trying
+		// to recreate it. Strategy is reported using the label helper so
+		// the summary stays consistent with the materialized case.
+		return workspaceResult{
+			Path:         wsPath,
+			Strategy:     DetectWorkspaceStrategy(source),
+			Materialized: false,
+		}, nil
+	} else if !os.IsNotExist(err) {
+		return workspaceResult{}, fmt.Errorf("stat workspace %s: %w", wsPath, err)
+	}
+
+	if source.IsGit {
+		info, err := workspace.CreateWorktree(aiEnvDir, envName, source.Path, template, now)
+		if err != nil {
+			return workspaceResult{}, err
+		}
+		return workspaceResult{
+			Path:         info.Path,
+			Strategy:     string(info.Strategy),
+			Branch:       info.Branch,
+			Materialized: true,
+		}, nil
+	}
+
+	info, err := workspace.CreateCopy(aiEnvDir, envName, source.Path, template, now)
+	if err != nil {
+		return workspaceResult{}, err
+	}
+	return workspaceResult{
+		Path:         info.Path,
+		Strategy:     string(info.Strategy),
+		Materialized: true,
+	}, nil
 }
 
 // ValidateEnvName enforces a conservative grammar so the env name can serve
@@ -639,6 +738,7 @@ type summary struct {
 	template       string
 	writtenFiles   []string
 	gitignoreState gitignoreResult
+	workspace      workspaceResult
 }
 
 // printSummary writes a deterministic, human-readable summary to w. Output
@@ -649,6 +749,17 @@ func printSummary(w io.Writer, s summary) {
 	fmt.Fprintf(w, "  strategy:       %s\n", s.strategy)
 	fmt.Fprintf(w, "  template:       %s\n", s.template)
 	fmt.Fprintf(w, "  config dir:     %s\n", s.aiEnvDir)
+
+	if s.workspace.Path != "" {
+		state := "created"
+		if !s.workspace.Materialized {
+			state = "exists (left unchanged)"
+		}
+		fmt.Fprintf(w, "  workspace:      %s [%s]\n", s.workspace.Path, state)
+		if s.workspace.Branch != "" {
+			fmt.Fprintf(w, "  branch:         %s\n", s.workspace.Branch)
+		}
+	}
 
 	if len(s.writtenFiles) > 0 {
 		names := make([]string, len(s.writtenFiles))
