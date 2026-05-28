@@ -8,6 +8,8 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
+
+	"github.com/rivan1986/ai-env/internal/cli"
 )
 
 // version is set at build time via -ldflags.
@@ -38,15 +40,29 @@ func newRootCmd() *cobra.Command {
 	return root
 }
 
-// newNewCmd returns the stub for `ai-env new`. Implementation lands in
-// step 5 of plan 01.
+// newNewCmd builds the `ai-env new` subcommand. Flag parsing happens here;
+// the actual scaffold logic lives in internal/cli so it can be tested
+// without involving Cobra.
 func newNewCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "new <env-name>",
 		Short: "Create a new ai-env environment for the current project",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return fmt.Errorf("ai-env new: not yet implemented")
+			fromPath, err := cmd.Flags().GetString("from")
+			if err != nil {
+				return fmt.Errorf("ai-env new: read --from: %w", err)
+			}
+			force, err := cmd.Flags().GetBool("force")
+			if err != nil {
+				return fmt.Errorf("ai-env new: read --force: %w", err)
+			}
+			return cli.RunNew(cli.NewOptions{
+				EnvName:  args[0],
+				FromPath: fromPath,
+				Force:    force,
+				Stdout:   cmd.OutOrStdout(),
+			})
 		},
 	}
 	cmd.Flags().String("from", "", "Source project path (defaults to current directory)")
