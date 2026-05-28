@@ -36,6 +36,7 @@ func newRootCmd() *cobra.Command {
 
 	root.AddCommand(newNewCmd())
 	root.AddCommand(newListCmd())
+	root.AddCommand(newDiffCmd())
 
 	return root
 }
@@ -84,4 +85,34 @@ func newListCmd() *cobra.Command {
 			})
 		},
 	}
+}
+
+// newDiffCmd builds the `ai-env diff` subcommand. Flag parsing happens
+// here; the actual diff logic lives in internal/cli so it can be tested
+// without involving Cobra.
+func newDiffCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "diff <env-name>",
+		Short: "Show changes between an ai-env workspace and its baseline",
+		Long: "Show the diff between an ai-env workspace and its baseline. " +
+			"For worktree-strategy envs this is the git diff between the env " +
+			"branch and the source repo's HEAD; for copy-strategy envs it is " +
+			"a file-level diff against the read-only baseline snapshot. " +
+			"Protected paths are highlighted in the summary.",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			nameOnly, err := cmd.Flags().GetBool("name-only")
+			if err != nil {
+				return fmt.Errorf("ai-env diff: read --name-only: %w", err)
+			}
+			return cli.RunDiff(cli.DiffOptions{
+				EnvName:  args[0],
+				NameOnly: nameOnly,
+				Stdout:   cmd.OutOrStdout(),
+				Stderr:   cmd.ErrOrStderr(),
+			})
+		},
+	}
+	cmd.Flags().Bool("name-only", false, "Print only the per-file summary; suppress the unified-diff body")
+	return cmd
 }
