@@ -68,9 +68,9 @@ ai-env/
    - Read each environment's metadata stub.
    - Print name, strategy, template, and last run state if available.
    - Never start a backend process.
-7. Add unit tests for config loading and generation.
-8. Add unit tests for stack detection.
-9. Add unit tests for `.gitignore` entry generation.
+7. ✅ Add unit tests for config loading and generation.
+8. ✅ Add unit tests for stack detection.
+9. ✅ Add unit tests for `.gitignore` entry generation.
 10. Add GitHub Actions CI workflow:
     - `go test ./...`
     - `go vet ./...`
