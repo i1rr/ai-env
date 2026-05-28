@@ -63,7 +63,7 @@ ai-env/
    - Detect project stack from marker files (`package.json`, `go.mod`, `Cargo.toml`, `pyproject.toml`, `requirements.txt`).
    - Select matching built-in template name (record in `ai-env.yaml`).
    - Print next command suggestion.
-6. Implement `ai-env list`:
+6. ✅ Implement `ai-env list`:
    - Scan `.ai-env/workspaces/` for environment directories.
    - Read each environment's metadata stub.
    - Print name, strategy, template, and last run state if available.

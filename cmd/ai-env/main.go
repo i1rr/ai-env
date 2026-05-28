@@ -70,15 +70,18 @@ func newNewCmd() *cobra.Command {
 	return cmd
 }
 
-// newListCmd returns the stub for `ai-env list`. Implementation lands in
-// step 6 of plan 01.
+// newListCmd builds the `ai-env list` subcommand. Like `new`, all logic
+// lives in internal/cli so it can be exercised without Cobra wiring.
 func newListCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "list",
 		Short: "List ai-env environments under .ai-env/workspaces/",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return fmt.Errorf("ai-env list: not yet implemented")
+			return cli.RunList(cli.ListOptions{
+				Stdout: cmd.OutOrStdout(),
+				Stderr: cmd.ErrOrStderr(),
+			})
 		},
 	}
 }
