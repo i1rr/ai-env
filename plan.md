@@ -51,8 +51,8 @@ ai-env/
 
 1. ✅ Create Go module (`go mod init`).
 2. ✅ Add Cobra CLI skeleton (`cmd/ai-env/main.go`).
-3. Define config structs for `ai-env.yaml`, `policy.yaml`, `agents.yaml`, `secrets.example.yaml`.
-4. Implement YAML config loader with validation.
+3. ✅ Define config structs for `ai-env.yaml`, `policy.yaml`, `agents.yaml`, `secrets.example.yaml`.
+4. ✅ Implement YAML config loader with validation.
 5. Implement `ai-env new <env-name> [--from <path>] [--force]`:
    - Resolve source path (current dir or `--from`).
    - Detect Git vs non-Git source (stub: record strategy, do not yet create worktree or copy).
