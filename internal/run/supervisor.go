@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/rivan1986/ai-env/internal/backend"
+	"github.com/rivan1986/ai-env/internal/network"
 )
 
 // defaultStatsPollInterval is how often the supervisor's stats / idle /
@@ -161,6 +162,41 @@ type SupervisorOptions struct {
 	// by. Required when BackendAdapter is non-nil; ignored otherwise. The
 	// CLI obtains it from Backend.Create earlier in the run lifecycle.
 	BackendEnvID string
+
+	// NetworkPolicyAdapter, when non-nil, is invoked during
+	// StateApplyingPolicy to install the supplied NetworkPolicy on
+	// NetworkPolicyEnvID (or BackendEnvID, when the network env id is
+	// empty). The supervisor enforces the plan's "fail closed" rule
+	// (master plan section 18, plan 05 step 4): if Apply returns a
+	// non-nil error, the supervisor aborts the run with
+	// StateFailedPolicy / StopReasonPolicyFailure rather than silently
+	// continuing into StateStartingAgent. Leaving the field nil skips
+	// the apply call entirely and preserves the legacy plan-03/04
+	// supervisor behavior where the StateApplyingPolicy transition is
+	// only a lifecycle stamp; production CLI call sites populate this
+	// once plan 05 wiring lands.
+	NetworkPolicyAdapter network.NetworkPolicyAdapter
+
+	// NetworkPolicy is the canonical runtime policy the
+	// NetworkPolicyAdapter installs. Used only when
+	// NetworkPolicyAdapter is non-nil; ignored otherwise. The supervisor
+	// does not validate the policy itself: callers are expected to
+	// build it via network.NewNetworkPolicy and call
+	// NetworkPolicy.Validate against the run's mode before construction
+	// so a misconfigured policy fails closed at config parse time, not
+	// after the workspace has been prepared. The supervisor passes the
+	// value through to Adapter.Apply verbatim.
+	NetworkPolicy network.NetworkPolicy
+
+	// NetworkPolicyEnvID is the envID NetworkPolicyAdapter.Apply is
+	// addressed by. Defaults to BackendEnvID when empty: in practice
+	// the same envID identifies both the running sandbox (for
+	// Backend.Exec / Backend.Stop) and the policy target (for
+	// Adapter.Apply). The field is kept distinct so a future backend
+	// that separates the two identities (e.g. a network namespace
+	// addressed by a different handle than the exec sandbox) can wire
+	// them independently without reshaping SupervisorOptions.
+	NetworkPolicyEnvID string
 
 	// Stdin, when non-nil, is the reader the supervisor pipes into the
 	// child's stdin. Used by the agent launchers (claude, codex) to hand
@@ -648,6 +684,22 @@ func (s *Supervisor) Run(ctx context.Context) (SupervisorResult, error) {
 	if s.checkCancel() {
 		return s.finalizeTerminal(s.takeTerminalCause(terminalCause{state: StateKilledByUser, reason: StopReasonSignal}), exitInfo{}), nil
 	}
+	// Fail-closed network policy install (plan 05 step 4 / master plan
+	// section 18). When a NetworkPolicyAdapter is configured the
+	// supervisor calls Apply here, after the StateApplyingPolicy
+	// lifecycle event has been recorded so an audit reader sees the
+	// failure attributed to the policy stage. A non-nil error aborts the
+	// run with StateFailedPolicy / StopReasonPolicyFailure; the run does
+	// NOT proceed to StateStartingAgent. Apply is the supervisor's only
+	// hook for installing egress rules in v0.1, so a silent skip on
+	// error would be the silent-degrade the plan explicitly forbids.
+	if err := s.applyNetworkPolicy(); err != nil {
+		cause := terminalCause{state: StateFailedPolicy, reason: StopReasonPolicyFailure, note: fmt.Sprintf("apply network policy: %v", err)}
+		return s.finalizeTerminal(cause, exitInfo{}), nil
+	}
+	if s.checkCancel() {
+		return s.finalizeTerminal(s.takeTerminalCause(terminalCause{state: StateKilledByUser, reason: StopReasonSignal}), exitInfo{}), nil
+	}
 	if err := s.enterSetup(StateStartingAgent); err != nil {
 		return s.finalizeTerminal(terminalCause{state: StateFailedAgent, reason: StopReasonAgentFailure, note: "lifecycle write failed during starting_agent"}, exitInfo{}), err
 	}
@@ -772,6 +824,47 @@ func (s *Supervisor) enterSetup(next State) error {
 		return nil
 	}
 	return nil
+}
+
+// applyNetworkPolicy installs the configured network policy via
+// opts.NetworkPolicyAdapter.Apply. It is the supervisor's fail-closed
+// hook for plan 05 step 4: the master plan's section 18 rule "Fail
+// closed: if the backend cannot apply the requested network policy,
+// autonomous mode must fail. Not silently degrade." is enforced here.
+//
+// When NetworkPolicyAdapter is nil the helper returns nil so the
+// supervisor's legacy callers (plan-03 / plan-04 tests that do not
+// construct a policy adapter) continue to walk through
+// StateApplyingPolicy as a lifecycle stamp only. Production CLI call
+// sites (added by later plan-05 batches) always supply an adapter, so
+// the nil path is a test convenience, not a runtime escape hatch.
+//
+// The envID passed to Apply is NetworkPolicyEnvID when set; the
+// supervisor falls back to BackendEnvID otherwise (the common case
+// where the policy target and the exec sandbox share an identifier).
+// A configured adapter with no envID at all is rejected with an error
+// so the failure is loud rather than silently applying to the empty
+// string, which every shipped adapter already rejects.
+//
+// A non-nil return aborts the run with StateFailedPolicy /
+// StopReasonPolicyFailure; the caller does NOT proceed to
+// StateStartingAgent. applyNetworkPolicy itself does not transition
+// the state machine; that is the caller's responsibility via
+// finalizeTerminal, which keeps the apply helper free of lifecycle
+// I/O and matches the rest of the supervisor's "helper computes,
+// caller transitions" pattern.
+func (s *Supervisor) applyNetworkPolicy() error {
+	if s.opts.NetworkPolicyAdapter == nil {
+		return nil
+	}
+	envID := s.opts.NetworkPolicyEnvID
+	if envID == "" {
+		envID = s.opts.BackendEnvID
+	}
+	if envID == "" {
+		return errors.New("run: NetworkPolicyAdapter configured without NetworkPolicyEnvID or BackendEnvID")
+	}
+	return s.opts.NetworkPolicyAdapter.Apply(envID, s.opts.NetworkPolicy)
 }
 
 // launchChild starts the configured command, wires stdout/stderr to the
