@@ -5,10 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/rivan1986/ai-env/internal/backend"
 )
 
 // defaultStatsPollInterval is how often the supervisor's stats / idle /
@@ -129,7 +132,41 @@ type SupervisorOptions struct {
 
 	// Command is the spec for the child process. Required; Program may
 	// not be empty.
+	//
+	// When BackendAdapter is non-nil the supervisor dispatches Command
+	// through Backend.Exec inside BackendEnvID instead of host-side
+	// exec.Command. The fields are interpreted the same way (Program +
+	// Args + Dir + Env) but their meaning shifts to "inside the sandbox":
+	// Program is resolved against the sandbox's $PATH, Dir is a path
+	// inside the sandbox (typically the workspace mount), and Env entries
+	// are forwarded into the sandbox environment.
 	Command CommandSpec
+
+	// BackendAdapter, when non-nil, makes the supervisor route the child
+	// process through Backend.Exec instead of a host-side exec.Command.
+	// This is the seam plan 04 step 8 wires: the Docker Sandboxes
+	// adapter, the mock backend, and any future adapter all flow through
+	// the same Supervisor without it learning their specifics.
+	//
+	// When BackendAdapter is nil the supervisor falls back to the legacy
+	// host-side exec.Command path. That fallback exists so unit tests
+	// that exercise the lifecycle / signal / timeout machinery can drive
+	// real subprocesses (sh -c ...) without having to construct a mock
+	// backend, and so the early plan-03 supervisor tests keep passing
+	// verbatim. Production callers (the `ai-env run` CLI) always supply
+	// a Backend.
+	BackendAdapter backend.Backend
+
+	// BackendEnvID is the envID Backend.Exec / Backend.Stop are addressed
+	// by. Required when BackendAdapter is non-nil; ignored otherwise. The
+	// CLI obtains it from Backend.Create earlier in the run lifecycle.
+	BackendEnvID string
+
+	// Stdin, when non-nil, is the reader the supervisor pipes into the
+	// child's stdin. Used by the agent launchers (claude, codex) to hand
+	// the task prompt to the agent CLI. Nil means "no stdin" (the agent
+	// reads from /dev/null inside the sandbox / host).
+	Stdin io.Reader
 
 	// ModelCredentialMode records how the agent obtains its model
 	// credentials. Defaults to ModelCredentialBackendManaged when
@@ -335,11 +372,41 @@ type Supervisor struct {
 	// already protects exec.Cmd against most races, but signalling
 	// Process directly while the wait goroutine reaps it is a known
 	// edge case; the mutex collapses both sides onto one path.
+	//
+	// The same mutex also guards the Backend.Exec bookkeeping
+	// (backendResult, backendExecErr) so the runLoop's stop / collect
+	// helpers can take a single lock regardless of which exec path is
+	// in flight. Exactly one of child / backendActive is meaningful at
+	// any time, set by launchChild based on opts.BackendAdapter.
 	childMu  sync.Mutex
 	child    *exec.Cmd
 	childErr error
 	childDone chan struct{}
 	waitOnce  sync.Once
+
+	// backendActive reports whether the exec is in flight through
+	// Backend.Exec rather than a host exec.Cmd. When true, child is nil
+	// and the backend goroutine writes backendResult / backendExecErr
+	// under childMu before closing childDone.
+	backendActive bool
+
+	// backendResult is the ExecResult Backend.Exec returned. Written by
+	// the backend-exec goroutine under childMu before closing
+	// childDone; read by collectExit afterwards.
+	backendResult backend.ExecResult
+
+	// backendExecErr is the spawn-side error Backend.Exec returned (a
+	// non-nil error here is the equivalent of exec.Cmd.Wait returning a
+	// non-ExitError). The runLoop maps a non-nil err with no exit code
+	// to StateFailedAgent.
+	backendExecErr error
+
+	// backendStopped guards Backend.Stop so the cancel + timeout + idle
+	// paths can all request a stop without racing the adapter into a
+	// double-stop. The Stop call itself is idempotent on every adapter we
+	// ship but the contract does not require it; we serialize here so
+	// future adapters can rely on at-most-one-Stop semantics.
+	backendStopped bool
 
 	// startedAt and stoppedAt are stamped by the main loop and
 	// surfaced via the result.
@@ -392,6 +459,13 @@ func NewSupervisor(opts SupervisorOptions) (*Supervisor, error) {
 	}
 	if opts.Command.Program == "" {
 		return nil, errors.New("run: NewSupervisor requires Command.Program")
+	}
+	if opts.BackendAdapter != nil && opts.BackendEnvID == "" {
+		// A Backend without an envID would crash at Exec time inside the
+		// adapter (every shipped adapter rejects an unknown / empty
+		// envID). Failing fast at construction keeps the error surface
+		// close to the misuse instead of mid-run.
+		return nil, errors.New("run: NewSupervisor requires BackendEnvID when BackendAdapter is set")
 	}
 	if opts.MaxRuntime < 0 {
 		return nil, fmt.Errorf("run: NewSupervisor: MaxRuntime must be non-negative, got %v", opts.MaxRuntime)
@@ -701,28 +775,49 @@ func (s *Supervisor) enterSetup(next State) error {
 }
 
 // launchChild starts the configured command, wires stdout/stderr to the
-// stream capture, and stores the resulting exec.Cmd on the supervisor.
-// Returns an error if the launch itself fails (binary missing, dir
-// invalid). On success the child is running and a single background
-// goroutine is reaping it; callers observe its completion via the
-// childDone channel and read childErr (under childMu) afterwards.
+// stream capture, and stores the result on the supervisor. Returns an
+// error if the launch itself fails (binary missing, dir invalid). On
+// success the child is running and a single background goroutine is
+// reaping it; callers observe its completion via the childDone channel
+// and read either childErr or backendExecErr (under childMu) afterwards.
+//
+// Dispatches on opts.BackendAdapter: when nil the supervisor runs the
+// child host-side via exec.Command (the legacy path the plan-03 tests
+// use); when non-nil it routes through Backend.Exec (the plan-04 step 8
+// wiring). Both paths converge on the same childDone / exit-info
+// contract so the runLoop / stop helpers do not need a second select.
+func (s *Supervisor) launchChild() error {
+	if s.opts.BackendAdapter != nil {
+		return s.launchChildBackend()
+	}
+	return s.launchChildHost()
+}
+
+// launchChildHost is the legacy host-side exec.Command path. It is used
+// by the run-package unit tests that drive the supervisor against a
+// real subprocess (sh -c ...) without constructing a mock backend.
 //
 // We own the Wait call here (rather than letting individual stop
 // helpers spawn their own) because exec.Cmd.Wait can only be called
 // once and races with any other observer touching ProcessState. The
 // single waiter writes the result; everyone else reads via the
 // done channel.
-func (s *Supervisor) launchChild() error {
+func (s *Supervisor) launchChildHost() error {
 	cmd := exec.Command(s.opts.Command.Program, s.opts.Command.Args...)
 	cmd.Dir = s.opts.Command.Dir
 	cmd.Env = s.opts.Command.Env
 	cmd.Stdout = s.streams.Stdout()
 	cmd.Stderr = s.streams.Stderr()
-	// Stdin is intentionally nil: the child reads from /dev/null so a
-	// stuck read on an uninitialised stdin can never deadlock the
-	// supervisor. The agent's interactive mode (later milestones) will
-	// route a PTY through here instead.
-	cmd.Stdin = nil
+	// Host fallback: only forward Stdin when the caller explicitly wired
+	// one. The legacy behavior was nil (child reads from /dev/null) and
+	// the existing plan-03 tests rely on it; an opt-in stdin reader keeps
+	// the agent launcher's task-on-stdin contract reachable without
+	// changing the no-stdin default the supervisor tests already assume.
+	if s.opts.Stdin != nil {
+		cmd.Stdin = s.opts.Stdin
+	} else {
+		cmd.Stdin = nil
+	}
 
 	if err := cmd.Start(); err != nil {
 		return err
@@ -744,6 +839,77 @@ func (s *Supervisor) launchChild() error {
 		close(s.childDone)
 	}()
 	return nil
+}
+
+// launchChildBackend dispatches the configured Command through
+// Backend.Exec. The Backend adapter is responsible for the actual
+// subprocess wiring; the supervisor only marshals the request, awaits
+// the result, and translates it back into the same childDone /
+// exit-info shape the host path uses.
+//
+// Stdin/Stdout/Stderr are wired through ExecOptions so the adapter can
+// stream the agent's output directly into the supervisor's
+// StreamCapture without an intermediate buffer. ExecOptions.Timeout is
+// left zero: the supervisor enforces its own MaxRuntime budget out of
+// band in the runLoop, and a second timeout layer in the adapter
+// would only race that without adding observability.
+func (s *Supervisor) launchChildBackend() error {
+	s.childMu.Lock()
+	s.backendActive = true
+	s.childDone = make(chan struct{})
+	done := s.childDone
+	s.childMu.Unlock()
+
+	cmd := backend.Command{
+		Program: s.opts.Command.Program,
+		Args:    s.opts.Command.Args,
+		Dir:     s.opts.Command.Dir,
+		Env:     s.opts.Command.Env,
+	}
+	opts := backend.ExecOptions{
+		Stdin:  execOptionsReader(s.opts.Stdin),
+		Stdout: execOptionsWriter(s.streams.Stdout()),
+		Stderr: execOptionsWriter(s.streams.Stderr()),
+	}
+
+	go func() {
+		// Backend.Exec is synchronous: it blocks until the child inside
+		// the sandbox exits or the adapter times it out / kills it. The
+		// supervisor's stop path triggers Backend.Stop separately, which
+		// causes Backend.Exec to return with a non-zero exit code; that
+		// return wakes this goroutine and the rest of the loop unblocks
+		// via childDone.
+		result, err := s.opts.BackendAdapter.Exec(s.opts.BackendEnvID, cmd, opts)
+		s.childMu.Lock()
+		s.backendResult = result
+		s.backendExecErr = err
+		s.childMu.Unlock()
+		close(done)
+	}()
+	return nil
+}
+
+// execOptionsReader narrows an io.Reader into the inline interface
+// backend.ExecOptions.Stdin declares. The narrowing is cheap and lets
+// the supervisor avoid importing the inline interface shape inline.
+// Returns nil so the adapter forwards "no stdin" rather than an empty
+// reader when the caller did not wire one.
+func execOptionsReader(r io.Reader) interface{ Read(p []byte) (int, error) } {
+	if r == nil {
+		return nil
+	}
+	return r
+}
+
+// execOptionsWriter is the writer analogue of execOptionsReader. The
+// StreamCapture's Stdout()/Stderr() never return nil so in practice
+// this is always a real writer, but the nil guard keeps the helper
+// safe to call from any caller (a test that disables stream capture).
+func execOptionsWriter(w io.Writer) interface{ Write(p []byte) (int, error) } {
+	if w == nil {
+		return nil
+	}
+	return w
 }
 
 // runLoop is the supervisor's StateRunning loop. It selects on the
@@ -789,21 +955,23 @@ func (s *Supervisor) runLoop() terminalCause {
 			// whether the exit was clean. We let the post-loop code
 			// inspect the recorded exit status; here we just pick the
 			// state.
-			s.childMu.Lock()
-			waitErr := s.childErr
-			s.childMu.Unlock()
-			if waitErr == nil {
+			waitErr, exitCode, hasExitCode := s.childWaitOutcome()
+			if waitErr == nil && hasExitCode && exitCode == 0 {
 				return terminalCause{state: StateCompleted, reason: StopReasonAgentExit, note: "child exited 0"}
 			}
-			// Non-zero exit: a recorded terminalCause (set by an
-			// earlier timer / cancel that we beat to the select) wins;
-			// otherwise this is a StateFailedAgent terminal because
-			// the agent itself returned non-zero.
+			// Non-zero exit (or spawn-side error from Backend.Exec): a
+			// recorded terminalCause (set by an earlier timer / cancel
+			// that we beat to the select) wins; otherwise this is a
+			// StateFailedAgent terminal because the agent itself
+			// returned non-zero or could not be launched.
 			recorded := s.takeTerminalCause(terminalCause{})
 			if recorded.state != "" {
 				return recorded
 			}
-			return terminalCause{state: StateFailedAgent, reason: StopReasonAgentFailure, note: fmt.Sprintf("child exit: %v", waitErr)}
+			if waitErr != nil {
+				return terminalCause{state: StateFailedAgent, reason: StopReasonAgentFailure, note: fmt.Sprintf("child exit: %v", waitErr)}
+			}
+			return terminalCause{state: StateFailedAgent, reason: StopReasonAgentFailure, note: fmt.Sprintf("child exit code %d", exitCode)}
 
 		case <-s.cancelCh:
 			// Cancel arrived. Record the intended terminal (Cancel's
@@ -861,21 +1029,65 @@ type exitInfo struct {
 	err     error
 }
 
+// childWaitOutcome returns the wait-side state the runLoop's exit-
+// detection branch needs: the spawn / wait error, the reported exit
+// code, and whether an exit code was actually reported. Hides the
+// host / backend dispatch so the runLoop body stays readable.
+func (s *Supervisor) childWaitOutcome() (waitErr error, exitCode int, hasExitCode bool) {
+	s.childMu.Lock()
+	defer s.childMu.Unlock()
+	if s.backendActive {
+		if s.backendExecErr != nil {
+			return s.backendExecErr, -1, false
+		}
+		if s.backendResult.HasExitCode {
+			return nil, s.backendResult.ExitCode, true
+		}
+		return nil, -1, false
+	}
+	if s.childErr != nil {
+		return s.childErr, -1, false
+	}
+	if s.child != nil && s.child.ProcessState != nil && s.child.ProcessState.Exited() {
+		return nil, s.child.ProcessState.ExitCode(), true
+	}
+	return nil, -1, false
+}
+
 // collectExit returns the child's exit info. By the time runLoop
-// returns the waiter goroutine has closed childDone and written
-// childErr, so reading ProcessState here cannot race with Wait. We
+// returns the waiter goroutine has closed childDone and written either
+// childErr (host path) or backendResult / backendExecErr (backend
+// path), so reading the result here cannot race with the producer. We
 // guard the read with childMu for paranoia and to keep the access
 // patterns consistent with launchChild.
 func (s *Supervisor) collectExit() exitInfo {
 	s.childMu.Lock()
+	backendActive := s.backendActive
 	c := s.child
 	done := s.childDone
 	s.childMu.Unlock()
-	if c == nil {
-		return exitInfo{code: -1, hasCode: false}
-	}
 	if done != nil {
 		<-done
+	}
+	if backendActive {
+		s.childMu.Lock()
+		res := s.backendResult
+		err := s.backendExecErr
+		s.childMu.Unlock()
+		if err != nil {
+			// Spawn / IO failure inside the adapter. We do not have a
+			// canonical exit code in that case; the runLoop maps the
+			// missing code to StateFailedAgent the same way a host-side
+			// exec.Start failure does.
+			return exitInfo{code: -1, hasCode: false, err: err}
+		}
+		if !res.HasExitCode {
+			return exitInfo{code: -1, hasCode: false}
+		}
+		return exitInfo{code: res.ExitCode, hasCode: true}
+	}
+	if c == nil {
+		return exitInfo{code: -1, hasCode: false}
 	}
 	s.childMu.Lock()
 	st := c.ProcessState
@@ -1110,18 +1322,43 @@ func (s *Supervisor) writeRecordSnapshot(state State, exitCode *int, stopReason 
 // to a hard kill if the child is still running.
 //
 // This is the path the cancel / timeout / idle terminals use to bring
-// the child down. Step 9 (signal handling) will reuse the same helper
-// when an OS signal arrives; keeping it in one place means there is
-// one piece of code to audit for the kill semantics.
+// the child down. Step 9 (signal handling) reuses the same helper when
+// an OS signal arrives; keeping it in one place means there is one
+// piece of code to audit for the kill semantics.
+//
+// Dispatches on backendActive: the host path signals the exec.Cmd
+// directly, while the backend path delegates to Backend.Stop and lets
+// the adapter pick the right signal / grace-window mechanics for its
+// underlying runtime. Both paths still wait on childDone (the goroutine
+// launched in launchChild* closes it once the child has been reaped).
 //
 // stopChildGracefully does NOT call Wait; launchChild owns the single
 // Wait goroutine. We observe child exit via the shared childDone
 // channel, which the waiter closes after Wait returns.
 func (s *Supervisor) stopChildGracefully() {
 	s.childMu.Lock()
+	backendActive := s.backendActive
 	c := s.child
 	done := s.childDone
 	s.childMu.Unlock()
+
+	if backendActive {
+		s.requestBackendStop(signalInterrupt, s.opts.StopGracePeriod)
+		// Wait the grace window. The backend goroutine closes done once
+		// Backend.Exec returns (which happens after Backend.Stop unwinds
+		// the child); if it does not, escalate to a hard stop with a
+		// zero timeout (every shipped adapter interprets this as
+		// "kill immediately").
+		t := time.NewTimer(s.opts.StopGracePeriod)
+		defer t.Stop()
+		select {
+		case <-t.C:
+			s.requestBackendStop(nil, 0)
+		case <-done:
+		}
+		return
+	}
+
 	if c == nil || c.Process == nil {
 		return
 	}
@@ -1144,15 +1381,50 @@ func (s *Supervisor) stopChildGracefully() {
 
 // hardKillChild forces the child down with SIGKILL (or its Windows
 // equivalent). Used after the grace window in stopChildGracefully and
-// in error paths that cannot afford to wait.
+// in error paths that cannot afford to wait. Backend-path runs route
+// through Backend.Stop with a zero timeout, leaving the "use SIGKILL
+// equivalent" decision to the adapter.
 func (s *Supervisor) hardKillChild() {
 	s.childMu.Lock()
+	backendActive := s.backendActive
 	c := s.child
 	s.childMu.Unlock()
+	if backendActive {
+		// Zero timeout asks the adapter for an immediate kill. Every
+		// shipped adapter treats this as "go straight to SIGKILL"; we
+		// do not pass a signal because the adapter's docker-sbx call
+		// picks the platform default and the kill path does not need a
+		// SIGINT pre-step (stopChildGracefully already did it).
+		s.requestBackendStop(nil, 0)
+		return
+	}
 	if c == nil || c.Process == nil {
 		return
 	}
 	_ = c.Process.Kill()
+}
+
+// requestBackendStop invokes Backend.Stop at most once per run. The
+// cancel / timeout / idle paths funnel through stopChildGracefully
+// (polite ask with SIGINT + grace window) and the hard-kill escalation
+// funnels through requestBackendStop(nil, 0). Adapters that document
+// at-most-one-Stop semantics see exactly one invocation; the second
+// call is dropped here rather than relying on adapter idempotency.
+//
+// Backend.Stop's contract accepts nil sig to mean "let the adapter
+// pick the platform default" and any os.Signal to forward explicitly.
+// The error is intentionally swallowed: a Stop failure usually means
+// the env is already down, which is exactly the state the caller
+// wanted.
+func (s *Supervisor) requestBackendStop(sig os.Signal, timeout time.Duration) {
+	s.childMu.Lock()
+	if s.backendStopped {
+		s.childMu.Unlock()
+		return
+	}
+	s.backendStopped = true
+	s.childMu.Unlock()
+	_ = s.opts.BackendAdapter.Stop(s.opts.BackendEnvID, sig, timeout)
 }
 
 // waitChild blocks until the child exits and returns the exit code.
