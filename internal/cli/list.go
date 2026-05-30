@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"text/tabwriter"
 
 	"github.com/rivan1986/ai-env/internal/config"
+	"github.com/rivan1986/ai-env/internal/run"
 )
 
 // ListOptions captures inputs for `ai-env list`. The list command takes no
@@ -47,9 +49,10 @@ type envEntry struct {
 	// ai-env.yaml (sandbox.template). "unknown" when unreadable.
 	Template string
 
-	// LastRun is a free-form description of the last recorded run state
-	// (e.g. a timestamp or status). Empty string when no run metadata
-	// exists on disk; printed as "-" by the table renderer.
+	// LastRun is the rendered "<state> (<run-id>)" string the table
+	// shows for the env's most recent run, or empty when no run.json
+	// has been written for this env yet. The table renderer prints "-"
+	// for the empty case so the column stays visually anchored.
 	LastRun string
 
 	// Dir is the absolute path to the workspace directory, for diagnostic
@@ -84,12 +87,69 @@ func RunList(opts ListOptions) error {
 	workspacesDir := filepath.Join(aiEnvDir, "workspaces")
 	entries, warnings := scanWorkspaces(workspacesDir)
 
+	// Annotate every entry with its latest run state. We do the runs
+	// scan once for the whole listing rather than per workspace so an
+	// `.ai-env/runs/` tree of N runs is read O(N) total, not O(N*M)
+	// where M is the workspace count. latestRunByEnv returns a map keyed
+	// by env name; entries missing from the map have no recorded runs
+	// (rendered as "-").
+	latestRuns, runWarn := latestRunByEnv(aiEnvDir)
+	if runWarn != "" {
+		warnings = append(warnings, runWarn)
+	}
+	for i := range entries {
+		if run, ok := latestRuns[entries[i].Name]; ok {
+			entries[i].LastRun = run
+		}
+	}
+
 	for _, w := range warnings {
 		fmt.Fprintln(opts.Stderr, "warning:", w)
 	}
 
 	printEnvTable(opts.Stdout, aiEnvDir, entries)
 	return nil
+}
+
+// latestRunByEnv returns a map from env name to the rendered "<state>
+// (<run-id>)" cell the LAST RUN column shows. The runs/ directory is
+// walked once and per-env latest state is selected by taking the first
+// matching run from the descending-sorted ListRuns result. Runs whose
+// run.json is missing or empty (the post-CreateRunDirectory placeholder
+// state) are skipped so a half-written run does not mask an older
+// completed one.
+//
+// Returns a warning string (empty when no warning is produced) so the
+// caller can fold it into the rest of the listing warnings without
+// re-doing the I/O.
+func latestRunByEnv(aiEnvDir string) (map[string]string, string) {
+	runs, err := run.ListRuns(aiEnvDir)
+	if err != nil {
+		// A failure to read the runs directory is non-fatal for the
+		// listing: workspaces are still shown without a last-run
+		// annotation. Surface the failure as a warning so the operator
+		// knows the column is incomplete rather than empty.
+		if !errors.Is(err, os.ErrNotExist) {
+			return map[string]string{}, fmt.Sprintf("read runs: %v", err)
+		}
+		return map[string]string{}, ""
+	}
+	out := make(map[string]string, len(runs))
+	for _, r := range runs {
+		if r.EnvName == "" {
+			continue
+		}
+		if _, seen := out[r.EnvName]; seen {
+			// ListRuns sorts descending so the first hit is the latest.
+			continue
+		}
+		state := "unknown"
+		if rec, err := run.ReadRecord(r.Path); err == nil {
+			state = string(rec.State)
+		}
+		out[r.EnvName] = fmt.Sprintf("%s (%s)", state, r.ID)
+	}
+	return out, ""
 }
 
 // findAIEnvDir walks upward from start looking for an `.ai-env` directory
@@ -199,39 +259,11 @@ func readWorkspaceEntry(dir string) (envEntry, string) {
 	if cfg.Sandbox.Template != "" {
 		entry.Template = cfg.Sandbox.Template
 	}
-	entry.LastRun = readLastRunState(dir)
+	// LastRun is intentionally left empty here. RunList annotates each
+	// entry from the .ai-env/runs/ tree after scanWorkspaces returns so
+	// the workspace scan does not have to know about the run package's
+	// on-disk layout. Workspaces with no recorded runs render as "-".
 	return entry, ""
-}
-
-// readLastRunState looks for a last-run marker inside the workspace. Plan 01
-// does not yet specify the exact format the supervisor will write, so we
-// look for a small set of common stub locations and return their contents
-// trimmed. An empty string means "no run recorded yet" and is rendered as
-// "-" in the table.
-//
-// Candidate files, in order:
-//   - last_run.txt at the workspace root
-//   - runs/last_run.txt under the workspace
-func readLastRunState(workspaceDir string) string {
-	candidates := []string{
-		filepath.Join(workspaceDir, "last_run.txt"),
-		filepath.Join(workspaceDir, "runs", "last_run.txt"),
-	}
-	for _, path := range candidates {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			continue
-		}
-		// Use the first non-empty line so multi-line files (e.g. a status
-		// followed by details) collapse cleanly into the table cell.
-		for _, line := range strings.Split(string(data), "\n") {
-			trimmed := strings.TrimSpace(line)
-			if trimmed != "" {
-				return trimmed
-			}
-		}
-	}
-	return ""
 }
 
 // printEnvTable writes a deterministic, column-aligned table of envs to w.

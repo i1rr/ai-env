@@ -38,6 +38,8 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(newListCmd())
 	root.AddCommand(newDiffCmd())
 	root.AddCommand(newPatchCmd())
+	root.AddCommand(newStatusCmd())
+	root.AddCommand(newLogsCmd())
 
 	return root
 }
@@ -147,5 +149,71 @@ func newPatchCmd() *cobra.Command {
 	}
 	cmd.Flags().String("out", "", "Path to write the unified-diff patch to (required)")
 	_ = cmd.MarkFlagRequired("out")
+	return cmd
+}
+
+// newStatusCmd builds the `ai-env status` subcommand. Flag parsing
+// happens here; the actual report logic lives in internal/cli so it can
+// be tested without involving Cobra.
+func newStatusCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "status <env-name>",
+		Short: "Show the current or last recorded run state for an env",
+		Long: "Show the current or last recorded run state for an env. Reads " +
+			"run.json (atomic-replace, so concurrent supervisor writes are " +
+			"safe) and the lifecycle.jsonl tail for the env's most recent " +
+			"run, then prints a stable human-readable report. Use `ai-env " +
+			"logs <env-name>` to see captured stdout/stderr.",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return cli.RunStatus(cli.StatusOptions{
+				EnvName: args[0],
+				Stdout:  cmd.OutOrStdout(),
+				Stderr:  cmd.ErrOrStderr(),
+			})
+		},
+	}
+	return cmd
+}
+
+// newLogsCmd builds the `ai-env logs` subcommand. Flag parsing happens
+// here; the actual streaming logic lives in internal/cli so it can be
+// tested without involving Cobra.
+func newLogsCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "logs <env-name>",
+		Short: "Print captured stdout/stderr for an env's latest run",
+		Long: "Print captured stdout and/or stderr for an env's latest run, " +
+			"or for a specific historical run when --run is given. With " +
+			"--follow the command keeps tailing the underlying log files " +
+			"until the run reaches a terminal state on disk or the operator " +
+			"cancels with SIGINT.",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			runID, err := cmd.Flags().GetString("run")
+			if err != nil {
+				return fmt.Errorf("ai-env logs: read --run: %w", err)
+			}
+			streamRaw, err := cmd.Flags().GetString("stream")
+			if err != nil {
+				return fmt.Errorf("ai-env logs: read --stream: %w", err)
+			}
+			follow, err := cmd.Flags().GetBool("follow")
+			if err != nil {
+				return fmt.Errorf("ai-env logs: read --follow: %w", err)
+			}
+			return cli.RunLogs(cli.LogsOptions{
+				EnvName: args[0],
+				RunID:   runID,
+				Stream:  cli.LogStream(streamRaw),
+				Follow:  follow,
+				Stdout:  cmd.OutOrStdout(),
+				Stderr:  cmd.ErrOrStderr(),
+			})
+		},
+	}
+	cmd.Flags().String("run", "", "Specific run id to display (defaults to the env's latest run)")
+	cmd.Flags().String("stream", "both", "Which stream to print: stdout, stderr, or both")
+	cmd.Flags().Bool("follow", false, "Keep tailing the log file(s) until the run reaches a terminal state")
 	return cmd
 }
