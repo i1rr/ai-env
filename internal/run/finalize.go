@@ -140,6 +140,28 @@ func GitDiffPath(runDir string) string {
 	return filepath.Join(runDir, gitDiffFileName)
 }
 
+// secretScanFileName is the basename of the per-run secret scanner
+// output file. The path mirrors gitDiffFileName so callers in scan /
+// report / export use a single helper instead of re-deriving the join.
+const secretScanFileName = "secret-scan.json"
+
+// dependencyReportFileName is the basename of the per-run dependency /
+// vulnerability scanner output file. Mirrors secretScanFileName.
+const dependencyReportFileName = "dependency-report.json"
+
+// SecretScanPath returns the absolute path of the secret-scan.json file
+// inside runDir. It is the symmetric helper to GitDiffPath; the scan
+// command writes here and the export gate reads here.
+func SecretScanPath(runDir string) string {
+	return filepath.Join(runDir, secretScanFileName)
+}
+
+// DependencyReportPath returns the absolute path of the
+// dependency-report.json file inside runDir. Mirrors SecretScanPath.
+func DependencyReportPath(runDir string) string {
+	return filepath.Join(runDir, dependencyReportFileName)
+}
+
 // terminalSupportsContinue reports whether a run that ended in state s
 // is eligible for the `--continue` suggestion the supervisor prints.
 //

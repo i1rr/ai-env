@@ -42,8 +42,45 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(newLogsCmd())
 	root.AddCommand(newReportCmd())
 	root.AddCommand(newAgentsCmd())
+	root.AddCommand(newScanCmd())
 
 	return root
+}
+
+// newScanCmd builds the `ai-env scan` subcommand. Flag parsing happens
+// here; the actual scan logic lives in internal/cli so it can be
+// exercised without Cobra wiring. The command runs the built-in
+// pattern-only secret scanner plus every available optional external
+// scanner against the env's workspace, writes secret-scan.json and
+// dependency-report.json to the env's latest run directory, and prints
+// a summary (plan 06 step 6).
+func newScanCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "scan <env-name>",
+		Short: "Scan an env's workspace for secrets and dependency issues",
+		Long: "Scan an env's workspace for secrets and dependency issues. " +
+			"Runs the built-in pattern-only secret scanner plus every available " +
+			"optional external scanner (gitleaks, osv-scanner, trivy, semgrep, " +
+			"npm-audit, pip-audit, cargo-audit, govulncheck). Writes " +
+			"secret-scan.json and dependency-report.json into the env's run " +
+			"directory and prints a summary. Missing optional scanners produce " +
+			"warnings, not crashes.",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			runID, err := cmd.Flags().GetString("run")
+			if err != nil {
+				return fmt.Errorf("ai-env scan: read --run: %w", err)
+			}
+			return cli.RunScan(cli.ScanOptions{
+				EnvName: args[0],
+				RunID:   runID,
+				Stdout:  cmd.OutOrStdout(),
+				Stderr:  cmd.ErrOrStderr(),
+			})
+		},
+	}
+	cmd.Flags().String("run", "", "Specific run id to write scan artifacts into (defaults to the env's latest run)")
+	return cmd
 }
 
 // newReportCmd builds the `ai-env report` subcommand. Flag parsing
