@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os/exec"
 	"sync"
 	"sync/atomic"
@@ -181,6 +182,42 @@ type SupervisorOptions struct {
 	// supervisor caller does not have to wire stream options unless it
 	// cares about the tail buffer size or a custom stream clock.
 	StreamOptions StreamOptions
+
+	// DiffCollector, when non-nil, is invoked on terminal so the
+	// supervisor can fetch the workspace's partial diff and write it
+	// into runDir/git-diff.patch before the closing run.json snapshot
+	// lands. This is the seam step 10 ("collect partial diff") uses; the
+	// CLI wires a workspace-aware collector here (typically built via
+	// NewGitWorktreeDiffCollector for a worktree-strategy env). Leaving
+	// it nil skips the collection step and leaves the empty git-diff.patch
+	// placeholder in place, which is the right v0.1 default for tests
+	// and for non-workspace-aware callers.
+	//
+	// The collector is invoked once per run from the supervisor's
+	// terminal path. Errors are advisory: they do NOT change the
+	// terminal state. See DiffCollector for the full contract.
+	DiffCollector DiffCollector
+
+	// DiffTimeout caps how long DiffCollector is allowed to run. Zero
+	// falls back to defaultDiffTimeout (10s). The cap matters because a
+	// stuck `git diff` (corrupt index, missing base ref, detached
+	// worktree) would otherwise block the supervisor's terminal walk
+	// past the user's expectation; the plan's "preserve logs, collect
+	// partial diff if possible" sequence treats the diff as advisory,
+	// so a timeout is the right escape hatch rather than waiting
+	// indefinitely.
+	DiffTimeout time.Duration
+
+	// UserOutput is the io.Writer the supervisor uses for user-visible
+	// terminal output. Today it is used by step 10 to print the
+	// `ai-env run <env-name> --continue` suggestion when the run lands
+	// in a continuation-eligible terminal (killed_by_user, timed_out,
+	// killed_idle). Nil is legal: the supervisor still records the
+	// suggestion on SupervisorResult.ContinueSuggestion so a programmatic
+	// caller can surface it without a writer. Production callers pass
+	// os.Stdout; tests pass a bytes.Buffer to assert on the printed
+	// text.
+	UserOutput io.Writer
 }
 
 // SupervisorResult is the outcome the supervisor reports back from Run.
@@ -219,6 +256,22 @@ type SupervisorResult struct {
 	// StoppedAt is when the run reached its terminal state. Always
 	// non-zero by the time Run returns.
 	StoppedAt time.Time
+
+	// ContinueSuggestion is the exact `--continue` command the user can
+	// re-run when the terminal supports continuation. Empty for
+	// terminals that do not (StateCompleted, the failure terminals).
+	// The supervisor also writes the same text to UserOutput when it is
+	// non-nil; the result field exists so programmatic callers (a
+	// future TUI, a structured-output CLI mode) can surface the
+	// suggestion without scraping stdout.
+	ContinueSuggestion string
+
+	// PartialDiffPath is the absolute path of the run directory's
+	// git-diff.patch file. The supervisor always populates this on
+	// terminal so a caller can locate the diff without re-deriving the
+	// layout. The file may be zero bytes (no collector configured, or
+	// collector returned no changes); it is always present.
+	PartialDiffPath string
 }
 
 // Supervisor owns one run's main loop. It is constructed once per run
@@ -233,15 +286,19 @@ type SupervisorResult struct {
 //
 // What the supervisor deliberately does NOT do in this batch:
 //
-//   - install OS signal handlers (that is step 9; Cancel is the seam
-//     step 9 will wire into).
-//   - collect partial diff or print --continue hints (that is step 10).
 //   - implement `ai-env status` / `logs` / `list` (those are batch 7).
 //   - re-link to a previous run beyond echoing the field through
 //     LinkedPreviousRun (that is step 14).
 //
 // Each of those leaves a clean extension point on this type but no
 // behaviour today.
+//
+// OS signal handlers are installed by InstallSignalHandlers (step 9),
+// which routes SIGINT / SIGTERM / SIGHUP into Cancel. Partial-diff
+// collection and the `--continue` suggestion (step 10) run inside
+// finalizeTerminal so they share the orderly shutdown path; see the
+// DiffCollector and UserOutput fields on SupervisorOptions for the
+// extension seams.
 type Supervisor struct {
 	opts SupervisorOptions
 
@@ -347,6 +404,9 @@ func NewSupervisor(opts SupervisorOptions) (*Supervisor, error) {
 	}
 	if opts.StopGracePeriod < 0 {
 		return nil, fmt.Errorf("run: NewSupervisor: StopGracePeriod must be non-negative, got %v", opts.StopGracePeriod)
+	}
+	if opts.DiffTimeout < 0 {
+		return nil, fmt.Errorf("run: NewSupervisor: DiffTimeout must be non-negative, got %v", opts.DiffTimeout)
 	}
 
 	now := opts.Now
@@ -902,9 +962,20 @@ func (s *Supervisor) driveTerminalSequence(cause terminalCause, exit exitInfo) t
 
 // finalizeTerminal is the single exit gate for Run. It ensures the
 // state machine has landed in cause.state (transitioning + writing the
-// lifecycle event if it has not already), stamps stoppedAt, writes the
-// closing run.json snapshot with exit code + stop reason + stopped_at,
-// and returns the SupervisorResult.
+// lifecycle event if it has not already), stamps stoppedAt, collects
+// the partial diff into runDir/git-diff.patch, writes the closing
+// run.json snapshot with exit code + stop reason + stopped_at, prints
+// the `--continue` suggestion to UserOutput when the terminal supports
+// it, and returns the SupervisorResult.
+//
+// The ordering matters: we land the state first (so an operator
+// inspecting lifecycle.jsonl mid-shutdown sees the terminal), then
+// collect the partial diff (so the closing run.json snapshot is written
+// after the on-disk diff is durable, never the other way around), then
+// rewrite run.json one last time, and finally surface the suggestion.
+// A failure on any step except the lifecycle transition is logged via
+// UserOutput (when set) but does NOT change the terminal: the plan
+// treats post-terminal artifacts as advisory.
 //
 // driveTerminalSequence may have already written some of these
 // transitions; in that case Transition returns an error which we
@@ -948,17 +1019,55 @@ func (s *Supervisor) finalizeTerminal(cause terminalCause, exit exitInfo) Superv
 		codePtr = &code
 	}
 	stopped := s.stoppedAt
-	// Best-effort closing snapshot. Failures here do not change the
-	// result we report back to the caller; the per-transition
-	// snapshots have already captured the state on disk.
+
+	// Step 10 (collect partial diff): invoke the configured collector
+	// against runDir/git-diff.patch with a context-bound timeout so a
+	// stuck git process cannot block the supervisor's terminal walk.
+	// The plan's "Collect partial diff if possible" rule treats the
+	// diff as advisory; we surface collector failures via UserOutput
+	// and via the supervisor's stderr equivalent but never escalate
+	// them to a different terminal state. The file is always present
+	// on disk after this call (it was created empty by
+	// CreateRunDirectory; the helper overwrites it on success and
+	// leaves the empty placeholder on the no-collector path).
+	if err := collectPartialDiff(s.opts.RunDir, s.opts.DiffCollector, s.opts.DiffTimeout); err != nil {
+		// Best-effort warning. Writing to UserOutput here is consistent
+		// with how the supervisor surfaces the --continue hint below;
+		// callers who left UserOutput nil simply do not see the
+		// warning. Nothing else in the codebase consumes this string
+		// today, so we keep the format human-readable rather than
+		// inventing a structured event.
+		if s.opts.UserOutput != nil {
+			_, _ = fmt.Fprintf(s.opts.UserOutput, "ai-env: warning: partial diff collection failed: %v\n", err)
+		}
+	}
+
+	// Closing run.json snapshot. Written after the partial diff lands
+	// so the snapshot reflects the run's true post-diff state on disk;
+	// a reader who opens run.json then git-diff.patch is guaranteed to
+	// see the diff that corresponds to the recorded terminal. Failures
+	// here are non-fatal: the per-transition snapshots already captured
+	// the state on disk, so the operator still sees the run in its
+	// terminal record even if this rewrite fails.
 	_ = s.writeRecordSnapshot(final, codePtr, &reason, &stopped)
+
+	// Print the `--continue` suggestion if the terminal supports it.
+	// The exact line is the master plan's "ai-env run <env-name>
+	// --continue"; we record it on the result so a programmatic caller
+	// can surface the same text without scraping stdout. Non-eligible
+	// terminals (StateCompleted, the failure states) get an empty
+	// suggestion both on stdout (nothing printed) and on the result.
+	suggestion := printContinueSuggestion(s.opts.UserOutput, s.opts.EnvName, final)
+
 	return SupervisorResult{
-		FinalState:  final,
-		StopReason:  reason,
-		ExitCode:    exit.code,
-		HasExitCode: exit.hasCode,
-		StartedAt:   s.startedAt,
-		StoppedAt:   s.stoppedAt,
+		FinalState:         final,
+		StopReason:         reason,
+		ExitCode:           exit.code,
+		HasExitCode:        exit.hasCode,
+		StartedAt:          s.startedAt,
+		StoppedAt:          s.stoppedAt,
+		ContinueSuggestion: suggestion,
+		PartialDiffPath:    GitDiffPath(s.opts.RunDir),
 	}
 }
 
