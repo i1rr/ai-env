@@ -217,9 +217,28 @@ type EnvironmentProbe struct {
 
 	// ProviderProxyURL is the base URL of the provider proxy when one
 	// is configured. Empty means provider_proxy is unavailable. Plan
-	// 05 wires this from secrets.local.yaml; today the launcher leaves
-	// it empty unless the operator threads it through ExtraEnv.
+	// 05 wires this from a running secrets.ProviderProxy via
+	// NewProviderProxyProbe; callers that build an EnvironmentProbe by
+	// hand may also set it directly.
 	ProviderProxyURL string
+
+	// ProviderProxyProvider names the upstream provider the proxy
+	// fronts ("anthropic", "openai", ...). Set alongside
+	// ProviderProxyURL when the proxy is known to be provider-specific
+	// so the resolver only injects the matching base-URL env var
+	// (ANTHROPIC_BASE_URL for "anthropic", OPENAI_BASE_URL for
+	// "openai"). The empty string preserves the legacy behavior of
+	// emitting both variables, which is the safe back-compat default
+	// for callers that haven't been updated to pass a provider.
+	//
+	// Setting this field is Plan 05 step 9's contribution: the
+	// supervisor builds the EnvironmentProbe from a started
+	// secrets.ProviderProxy whose Provider() identifies the upstream,
+	// so the resolver sets ANTHROPIC_BASE_URL or OPENAI_BASE_URL but
+	// not both. The launcher does not need to know which env var
+	// applies to its own agent; the resolver picks the right one based
+	// on the proxy's reported provider.
+	ProviderProxyProvider string
 
 	// RawTokenEnv is the explicit KEY=VALUE list the operator
 	// supplied for raw_env_explicit (e.g., ANTHROPIC_API_KEY=sk-...).
@@ -721,7 +740,7 @@ func ResolveCredentialModeDetailed(contract config.AgentCredentialMode, env Envi
 				})
 				continue
 			}
-			injected := providerProxyEnv(env.ProviderProxyURL)
+			injected := providerProxyEnv(env.ProviderProxyURL, env.ProviderProxyProvider)
 			considered = append(considered, CredentialModeAttempt{
 				Mode: m, OK: true, Reason: "selected: agent points at provider proxy",
 			})
@@ -779,12 +798,26 @@ func credentialModeOrder(contract config.AgentCredentialMode) []string {
 }
 
 // providerProxyEnv returns the KEY=VALUE pairs the launcher must
-// inject so the agent CLI routes requests through proxyURL. Both
-// Claude and Codex honor the same convention (ANTHROPIC_BASE_URL /
-// OPENAI_BASE_URL), so emitting both is harmless: each agent ignores
-// the other's variable. Splitting this out keeps the resolver's main
-// switch readable.
-func providerProxyEnv(proxyURL string) []string {
+// inject so the agent CLI routes requests through proxyURL.
+//
+// When the caller knows which provider the proxy fronts (anthropic /
+// openai) it passes the name in provider; the helper then emits only
+// the matching base-URL env var so a proxy that targets api.openai.com
+// does not accidentally redirect an Anthropic-only agent through it.
+// This is Plan 05 step 9's "ANTHROPIC_BASE_URL or OPENAI_BASE_URL"
+// contract: exactly one variable when the provider is known.
+//
+// When provider is empty (legacy callers, or a proxy that fronts both
+// upstreams), the helper falls back to emitting both variables. Each
+// agent ignores the other's variable so this is harmless; it also
+// keeps the existing resolver-test corpus working without churn.
+func providerProxyEnv(proxyURL, provider string) []string {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "anthropic":
+		return []string{"ANTHROPIC_BASE_URL=" + proxyURL}
+	case "openai":
+		return []string{"OPENAI_BASE_URL=" + proxyURL}
+	}
 	return []string{
 		"ANTHROPIC_BASE_URL=" + proxyURL,
 		"OPENAI_BASE_URL=" + proxyURL,
