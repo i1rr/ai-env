@@ -241,6 +241,97 @@ func (b *BuiltIn) DiscoverExternal() []ExternalScanner {
 	return discoverExternal(b.lookPath)
 }
 
+// ScanText runs the built-in pattern set, custom patterns, allowlist,
+// and warn-only entropy analyzer against an in-memory text payload.
+// label is a workspace-style identifier the caller chooses to identify
+// the source of the text (e.g. "pr_title", "pr_body",
+// "commit_message[0]"); it is recorded as Finding.File so a downstream
+// consumer can render where the secret was found without having to
+// invent a filesystem path. text is the raw text to scan; embedded
+// newlines split it into lines so multi-line bodies (a PR description,
+// a commit message) produce per-line findings with stable line numbers.
+//
+// The result is shaped identically to RunBuiltIn's output (Scanner =
+// "built-in-patterns"; Findings carry Confidence=ConfidenceHigh and
+// BlocksExport=true; EntropyOnly=false). This is the entry point plan
+// 07 step 5 calls for: the GitHub broker scans PR metadata (title,
+// body, branch name, commit messages) with the same built-in scanner
+// that gates workspace exports, so the two surfaces share one pattern
+// vocabulary.
+//
+// label must be non-empty; an empty label is reported as an error
+// rather than silently producing findings with no file context.
+// Allowlisted lines (inline "ai-env-scan-ignore" comment, Config.Allowlist
+// regexes) suppress both pattern findings and entropy warnings, just
+// like the file path. Returned error is non-nil only for input
+// validation failures; a clean scan with no findings returns a
+// populated ScanResult and a nil error.
+func (b *BuiltIn) ScanText(label, text string) (ScanResult, error) {
+	if label == "" {
+		return ScanResult{}, fmt.Errorf("scanners: ScanText label is empty")
+	}
+
+	result := ScanResult{
+		Scanner:         scannerNameBuiltIn,
+		Findings:        []Finding{},
+		EntropyWarnings: []EntropyWarning{},
+		ScannedAt:       time.Now(),
+	}
+	if text == "" {
+		return result, nil
+	}
+
+	lines := strings.Split(text, "\n")
+	nextID := 1
+	for i, line := range lines {
+		lineNo := i + 1
+		if b.lineAllowlisted(line) {
+			continue
+		}
+
+		patternHit := false
+		for _, rule := range b.patterns {
+			if rule.re.MatchString(line) {
+				result.Findings = append(result.Findings, Finding{
+					ID:           fmt.Sprintf("finding_%03d", nextID),
+					Type:         rule.kind,
+					Pattern:      rule.name,
+					File:         label,
+					Line:         lineNo,
+					Confidence:   ConfidenceHigh,
+					EntropyOnly:  false,
+					BlocksExport: true,
+				})
+				nextID++
+				patternHit = true
+			}
+		}
+		for _, rule := range b.customPatterns {
+			if rule.re.MatchString(line) {
+				result.Findings = append(result.Findings, Finding{
+					ID:           fmt.Sprintf("finding_%03d", nextID),
+					Type:         rule.kind,
+					Pattern:      rule.name,
+					File:         label,
+					Line:         lineNo,
+					Confidence:   ConfidenceHigh,
+					EntropyOnly:  false,
+					BlocksExport: true,
+				})
+				nextID++
+				patternHit = true
+			}
+		}
+
+		if patternHit || b.entropy == nil {
+			continue
+		}
+		result.EntropyWarnings = append(result.EntropyWarnings, b.entropy.analyzeLine(label, lineNo, line)...)
+	}
+
+	return result, nil
+}
+
 // SetLookPath installs the exec.LookPath seam used by DiscoverExternal.
 // Production callers leave the hook nil; tests inject a fake to assert
 // discovery behavior without touching the host PATH.
