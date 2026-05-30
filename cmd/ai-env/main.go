@@ -40,8 +40,82 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(newPatchCmd())
 	root.AddCommand(newStatusCmd())
 	root.AddCommand(newLogsCmd())
+	root.AddCommand(newAgentsCmd())
 
 	return root
+}
+
+// newAgentsCmd builds the `ai-env agents` parent command and attaches
+// its three subcommands (list, doctor, probe). The parent has no body
+// of its own; running it prints the standard Cobra help so operators
+// can discover the subcommands via `ai-env agents -h`.
+func newAgentsCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "agents",
+		Short: "Inspect registered agent CLIs and their health",
+		Long: "Inspect the agent launchers ai-env knows about. " +
+			"Use `list` for a one-line-per-agent table, `doctor` for a " +
+			"pass/fail health report covering binary, version, " +
+			"autonomous flags, and credential mode, and `probe <agent>` " +
+			"for a detailed report including the captured --help output.",
+	}
+	cmd.AddCommand(newAgentsListCmd())
+	cmd.AddCommand(newAgentsDoctorCmd())
+	cmd.AddCommand(newAgentsProbeCmd())
+	return cmd
+}
+
+// newAgentsListCmd builds the `ai-env agents list` subcommand. Flag
+// parsing happens here; the actual table logic lives in internal/cli
+// so it can be tested without involving Cobra.
+func newAgentsListCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "list",
+		Short: "List registered agent launchers and detected versions",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return cli.RunAgentsList(cli.AgentsListOptions{
+				Stdout: cmd.OutOrStdout(),
+				Stderr: cmd.ErrOrStderr(),
+			})
+		},
+	}
+}
+
+// newAgentsDoctorCmd builds the `ai-env agents doctor` subcommand. It
+// runs the same probes the supervisor uses and prints PASS/FAIL per
+// check. Exits non-zero when any check fails so it is CI-friendly.
+func newAgentsDoctorCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "doctor",
+		Short: "Run health checks for every registered agent launcher",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return cli.RunAgentsDoctor(cli.AgentsDoctorOptions{
+				Stdout: cmd.OutOrStdout(),
+				Stderr: cmd.ErrOrStderr(),
+			})
+		},
+	}
+}
+
+// newAgentsProbeCmd builds the `ai-env agents probe <agent>`
+// subcommand. The probe runs the full Probe pipeline for one agent and
+// prints the discovered version, selected autonomous flags, and the
+// first lines of the captured --help output.
+func newAgentsProbeCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "probe <agent>",
+		Short: "Probe a single agent CLI (version, autonomous flags, --help)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return cli.RunAgentsProbe(cli.AgentsProbeOptions{
+				AgentName: args[0],
+				Stdout:    cmd.OutOrStdout(),
+				Stderr:    cmd.ErrOrStderr(),
+			})
+		},
+	}
 }
 
 // newNewCmd builds the `ai-env new` subcommand. Flag parsing happens here;
