@@ -31,7 +31,9 @@ package scanners
 
 import (
 	"bufio"
+	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -97,15 +99,20 @@ type Config struct {
 // DiscoverExternal so allowlist and custom-pattern compilation costs
 // are paid once.
 //
-// RunExternal and DiscoverExternal are stubbed in this file; the
-// gitleaks integration (step 4) and PATH discovery (step 5) replace
-// the stubs in later batches. The stubs return empty results rather
-// than nil so callers can range over the slice without a nil check.
+// The external-scanner surface (RunExternal, DiscoverExternal) is
+// delegated to the registry in external.go. BuiltIn carries optional
+// hooks (lookPath, runner) so tests can drive discovery and gitleaks
+// without a real binary on PATH; production code leaves them nil and
+// the package falls back to exec.LookPath plus an os/exec-backed
+// runner.
 type BuiltIn struct {
 	patterns       []patternRule
 	customPatterns []patternRule
 	allowlist      []*regexp.Regexp
 	entropy        *entropyAnalyzer
+
+	lookPath func(string) (string, error)
+	runner   externalRunner
 }
 
 // Compile-time check that *BuiltIn satisfies ScanRunner. Step 2 only
@@ -214,21 +221,42 @@ func (b *BuiltIn) RunBuiltIn(workspacePath string, diff workspace.DiffResult) (S
 	return result, nil
 }
 
-// RunExternal is a placeholder that will be filled in step 4
-// (gitleaks) and step 5 (other external scanners). For batch 1 the
-// built-in scanner has no external integrations, so any caller asking
-// for one is told the scanner is not Available.
+// RunExternal implements ScanRunner. It delegates to runExternal in
+// external.go, which looks the requested scanner up in the registry,
+// refuses to invoke a tool whose discovery reported Available=false,
+// and dispatches to the per-tool adapter (gitleaks today; other
+// vulnerability scanners land in plan 07). The runner seam on BuiltIn
+// is forwarded so tests can intercept the subprocess.
 func (b *BuiltIn) RunExternal(scanner ExternalScanner, workspacePath string) (ScanResult, error) {
-	return ScanResult{}, fmt.Errorf("scanners: external scanner %q not yet implemented", scanner.Name)
+	return runExternal(b.runner, scanner, workspacePath)
 }
 
-// DiscoverExternal is a placeholder that will be filled in step 5
-// (PATH-based discovery for gitleaks, osv-scanner, trivy, semgrep,
-// npm audit, pip-audit, cargo audit, govulncheck). For batch 1 it
-// returns an empty slice so callers can range over the result without
-// a nil check.
+// DiscoverExternal implements ScanRunner. It delegates to
+// discoverExternal in external.go, which probes PATH for every entry
+// in knownExternalScanners and stamps a per-tool Available flag. A
+// missing binary is reported as Available=false with a Message; the
+// call never returns an error, satisfying the plan's "missing optional
+// scanners do not crash" rule.
 func (b *BuiltIn) DiscoverExternal() []ExternalScanner {
-	return []ExternalScanner{}
+	return discoverExternal(b.lookPath)
+}
+
+// SetLookPath installs the exec.LookPath seam used by DiscoverExternal.
+// Production callers leave the hook nil; tests inject a fake to assert
+// discovery behavior without touching the host PATH.
+func (b *BuiltIn) SetLookPath(fn func(string) (string, error)) {
+	b.lookPath = fn
+}
+
+// SetExternalRunner installs the subprocess seam used by RunExternal.
+// Production callers leave the hook nil; tests inject a fake to drive
+// the per-tool adapters with canned stdout / stderr / exit codes.
+func (b *BuiltIn) SetExternalRunner(fn func(ctx context.Context, binary string, args []string, dir string, stdout, stderr io.Writer) (int, error)) {
+	if fn == nil {
+		b.runner = nil
+		return
+	}
+	b.runner = externalRunner(fn)
 }
 
 // targets resolves the list of workspace-relative file paths the
