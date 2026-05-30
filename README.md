@@ -2,11 +2,11 @@
 
 `ai-env` is a Go CLI that scaffolds isolated sandbox environments for AI coding agents. It keeps each agent's work in its own workspace and configuration tree under `.ai-env/`, separate from your active working copy.
 
-This repository contains plans 01 through 04: project scaffolding, configuration loading and validation, workspace isolation via Git worktrees or directory copies, diff and patch export, protected path matching, the run-lifecycle supervisor (run IDs, run directory layout, lifecycle state machine, disk-streamed stdout/stderr capture, max-runtime and signal handling, partial-diff collection, and the `--continue` link), the Backend interface with a Docker Sandboxes (`sbx`) adapter and an in-memory mock, agent launchers for Claude Code and Codex with version, flag, and credential probing, and the `ai-env agents` family of subcommands. Network policy enforcement and scanning are tracked in later plans.
+This repository contains plans 01 through 05: project scaffolding, configuration loading and validation, workspace isolation via Git worktrees or directory copies, diff and patch export, protected path matching, the run-lifecycle supervisor (run IDs, run directory layout, lifecycle state machine, disk-streamed stdout/stderr capture, max-runtime and signal handling, partial-diff collection, and the `--continue` link), the Backend interface with a Docker Sandboxes (`sbx`) adapter, rootless Docker and Podman fallback backends, and an in-memory mock, agent launchers for Claude Code and Codex with version, flag, and credential probing, the `ai-env agents` family of subcommands, the canonical runtime `NetworkPolicy` plus `NetworkPolicyAdapter` interface with fail-closed supervisor wiring, a host-side provider proxy that fronts Anthropic / OpenAI traffic with redacted logs, per-run `network-events.jsonl`, the `ai-env report` subcommand, and the per-run `final-summary.md` that includes the network section. Scanner integration is tracked in later plans.
 
 ## Status
 
-Plans 01, 02, 03, and 04 complete. The CLI builds and runs on macOS and Linux, has unit and integration tests for config, scaffold, stack detection, gitignore handling, workspace materialization (Git and non-Git fixtures), diff and patch generation, protected path patterns, run-ID uniqueness within the same second, max-runtime timeout, SIGINT log/diff preservation, `sbx` version compatibility, agent flag selection, and credential-mode resolution. CI runs `gofmt`, `go vet`, `go test -race`, `staticcheck`, and `govulncheck` via GitHub Actions. Real-backend and real-agent integration tests are gated behind `AI_ENV_BACKEND_INTEGRATION=1` and skip cleanly when their host prerequisites are absent.
+Plans 01, 02, 03, 04, and 05 complete. The CLI builds and runs on macOS and Linux, has unit and integration tests for config, scaffold, stack detection, gitignore handling, workspace materialization (Git and non-Git fixtures), diff and patch generation, protected path patterns, run-ID uniqueness within the same second, max-runtime timeout, SIGINT log/diff preservation, `sbx` version compatibility, agent flag selection, credential-mode resolution, the network policy validator, the `docker_sbx` policy adapter, the docker / podman fallback adapters (including the `--accept-reduced-isolation` and `--unsafe-host-network` gates), the provider proxy (loopback bind, upstream domain pin, host-side auth injection, log redaction, shutdown), the `network-events.jsonl` writer and summary, the `ai-env report` renderer, and the `final-summary.md` writer. CI runs `gofmt`, `go vet`, `go test -race`, `staticcheck`, and `govulncheck` via GitHub Actions. Real-backend and real-agent integration tests are gated behind `AI_ENV_BACKEND_INTEGRATION=1` and skip cleanly when their host prerequisites are absent.
 
 ## Installation
 
@@ -106,13 +106,24 @@ Prints captured stdout and/or stderr for an env's latest run. Flags:
 
 An env with no recorded runs yet exits 0 with a friendly "no runs recorded" message. The log files are opaque text (whatever the agent wrote); `ai-env logs` does not parse them.
 
+### `ai-env report <env-name> [--run <id>]`
+
+Prints a one-shot report for an env's latest run (or for a specific historical run when `--run` is set), folding the network section into the same view the supervisor writes to `final-summary.md`. The output has four stable blocks rendered in this order:
+
+1. Env handle: env name, run id, state, agent, backend (each line omitted when the corresponding field is absent, so a run that aborted before recording, for example, an agent does not surface a blank line).
+2. Timing: `started`, `stopped`, `elapsed` for terminal runs; `elapsed (running)` for in-flight runs.
+3. Network section: `network policy: applied | not attempted | failed`, the resolved `default`, the normalized allow-domain list, the blocked CIDRs and hosts the policy enforced, the total / allowed / denied event counts read from `network-events.jsonl`, and a "top allowed" / "top denied" destination breakdown when events are present. When `policy.yaml` could not be applied (the supervisor's `failed_policy` terminal) the same line includes the adapter's error so an operator can debug without opening JSONL by hand.
+4. Artifacts: absolute paths to `run dir`, `run.json`, `lifecycle.jsonl`, `network-events.jsonl`, `final-summary.md`, and `git-diff.patch`.
+
+`report` is a one-shot read (no tail), reads `run.json` via atomic snapshot so a live supervisor never produces a torn record, and exits 0 with a friendly "no runs recorded" message for an env that has never been run. Malformed lines in `network-events.jsonl` produce a stderr warning but do not block the rest of the report.
+
 ### `ai-env agents list`
 
 Loads the project's `.ai-env/agents.yaml`, unions its keys with the launchers registered in code, and prints a four-column table: `NAME`, `BINARY`, `VERSION`, `STATUS`. Every probe runs with a short host-side timeout (10 seconds) so a wedged agent CLI cannot stall the table. Status values are descriptive strings (`ok`, `binary not found`, `version unsupported (<constraint>)`, `probe failed`, `no launcher registered`, `no contract in agents.yaml`, `unknown agent`) rather than booleans, so the operator can spot the precise mismatch at a glance. `list` never trial-runs autonomous flags; it only invokes the version subcommand.
 
 ### `ai-env agents doctor`
 
-Runs the four-check health report for every registered agent: binary on `PATH`, parsed version satisfies the contract's `version_constraint`, the requested autonomous flag candidate appears in `--help`, and a credential mode is plausibly available. Each check renders as a `PASS  <check>: <reason>` or `FAIL  <check>: <reason>` line so the output is grep-friendly. `doctor` exits non-zero when any check fails, so it is safe to wire into CI. The credential check is host-side and best-effort: `backend_managed` is reported as "verified at run time" (it requires an active backend), `provider_proxy` is reported as a Plan 05 stub, and `raw_env_explicit` reports whether the conventional raw-token env var (`ANTHROPIC_API_KEY` for Claude, `OPENAI_API_KEY` for Codex) is present. The supervisor enforces the real fail-closed check at run time.
+Runs the four-check health report for every registered agent: binary on `PATH`, parsed version satisfies the contract's `version_constraint`, the requested autonomous flag candidate appears in `--help`, and a credential mode is plausibly available. Each check renders as a `PASS  <check>: <reason>` or `FAIL  <check>: <reason>` line so the output is grep-friendly. `doctor` exits non-zero when any check fails, so it is safe to wire into CI. The credential check is host-side and best-effort: `backend_managed` is reported as "verified at run time" (it requires an active backend), `provider_proxy` is reported as available when the host has plausibly configured the proxy (the full host-side credential plumbing lands with the secret store in a later plan), and `raw_env_explicit` reports whether the conventional raw-token env var (`ANTHROPIC_API_KEY` for Claude, `OPENAI_API_KEY` for Codex) is present. The supervisor enforces the real fail-closed check at run time.
 
 ### `ai-env agents probe <agent>`
 
@@ -135,13 +146,13 @@ When the supervisor (`internal/run`) drives a run, it materializes everything un
   transcript.md        # placeholder for the rendered transcript
   shell-commands.jsonl # populated by shell shim (later plans)
   filesystem-events.jsonl
-  network-events.jsonl
+  network-events.jsonl # one JSON object per network decision (plan 05)
   policy-decisions.jsonl
   git-diff.patch       # partial diff collected on stop
   secret-scan.json     # populated by scanner (later plans)
   dependency-report.json
   security-report.md
-  final-summary.md
+  final-summary.md     # written on terminal by the supervisor (plan 05)
   scan-results/        # scanner output subdirectory
 ```
 
@@ -195,18 +206,19 @@ On every terminal the supervisor's finalizer runs an orderly shutdown:
 
 The previous run's workspace is left exactly as the agent left it: no checkout, no reset, no clean. The supervisor's main loop opens the workspace via `workspace.ReadMetadata` at wire time, and that metadata was written once by `ai-env new`, so the agent on the new run sees the workspace in the same state as the previous run left it. The continuation relationship lives only in `run.json`'s `linked_previous_run` field; no special lifecycle event is emitted.
 
-Note: the supervisor primitives, status, logs, list-with-run-state, and `--continue` plumbing all landed in plan 03. The Backend interface, agent launchers, and `ai-env agents` subcommands documented below landed in plan 04 alongside the supervisor's optional `BackendAdapter` seam. The user-facing `ai-env run` subcommand that wires them together end-to-end is tracked in plan 05.
+Note: the supervisor primitives, status, logs, list-with-run-state, and `--continue` plumbing all landed in plan 03. The Backend interface, agent launchers, and `ai-env agents` subcommands documented below landed in plan 04 alongside the supervisor's optional `BackendAdapter` seam. Plan 05 added the canonical `NetworkPolicy`, the `NetworkPolicyAdapter` interface, the docker_sbx network adapter, the rootless docker / podman fallback backends, the host-side provider proxy, the `network-events.jsonl` writer, the `ai-env report` subcommand, and the `final-summary.md` writer (with the network section). The user-facing `ai-env run` subcommand that wires the supervisor, the backend, the network adapter, and the provider proxy together end-to-end is tracked in a later plan.
 
 ## Backend abstraction
 
 The `Backend` interface in `internal/backend/backend.go` is the contract every sandbox implementation satisfies. It exposes nine methods (`Detect`, `Create`, `Start`, `Exec`, `Stop`, `CopyIn`, `CopyOut`, `ApplyNetworkPolicy`, `Stats`, `Destroy`) the supervisor drives through a run's lifecycle. Backends are addressed by an opaque `envID` returned from `Create`; `Detect` reports `BackendStatus` (name, availability, version, whether the version is in the tested range, and a short diagnostic message) without ever returning an error.
 
-Two implementations ship today:
+Four implementations ship today:
 
 - `internal/backend/mock` is an in-memory no-op backend used by unit tests. It records every method call against an internal log so tests can assert that the supervisor invoked the backend in the expected order without spawning processes.
-- `internal/backend/docker_sbx` wraps the Docker Sandboxes `sbx` CLI. `Detect` shells out to `sbx version`, parses a semver-ish token, and compares it against the inclusive range in `internal/backend/docker_sbx/compat.go` (`MinTestedVersion`..`MaxTestedVersion`, currently `0.1.0 - 0.9.99`). Versions outside that range surface as `VersionSupported=false`, and the operator must opt in with `--allow-untested-backend-version` to proceed. The adapter parses minimally: it relies on exit codes, the version probe, and known workspace paths rather than scraping interactive `sbx` stdout for state transitions, so if upstream output formatting changes but exit codes and paths still work, `ai-env` keeps working.
+- `internal/backend/docker_sbx` wraps the Docker Sandboxes `sbx` CLI. `Detect` shells out to `sbx version`, parses a semver-ish token, and compares it against the inclusive range in `internal/backend/docker_sbx/compat.go` (`MinTestedVersion`..`MaxTestedVersion`, currently `0.1.0 - 0.9.99`). Versions outside that range surface as `VersionSupported=false`, and the operator must opt in with `--allow-untested-backend-version` to proceed. The adapter parses minimally: it relies on exit codes, the version probe, and known workspace paths rather than scraping interactive `sbx` stdout for state transitions, so if upstream output formatting changes but exit codes and paths still work, `ai-env` keeps working. The `docker_sbx` adapter also implements `NetworkPolicyAdapter` by translating the canonical runtime policy into `sbx network apply` flags (`--default-policy deny`, `--allow-domain`, `--block-cidr` per always-blocked range, `--block-host` per always-blocked name); see "Network policy enforcement" below.
+- `internal/backend/docker` and `internal/backend/podman` are the reduced-isolation fallback backends. Each shells out to the respective host CLI (rootless or rooted: the adapters do not distinguish, but the master plan recommends rootless), brings up a container per env with `--network none` by default, and refuses to mark itself `Available` in autonomous mode unless the operator passes `--accept-reduced-isolation`. Both fallbacks print the verbatim reduced-isolation warning text from the plan the first time `Detect` observes acceptance. Their `ApplyNetworkPolicy` implementation is a structural validator only: `network none` honors every policy trivially (the container has no outbound network), and `--unsafe-host-network` (which requires both `--accept-reduced-isolation` and an explicit `--unsafe-host-network` toggle) accepts only policies with `default: allow` or with no allow-domain list, because the rootless fallback has no per-destination firewall. See "Reduced-isolation fallback backends" below.
 
-The supervisor in `internal/run/supervisor.go` exposes an optional `BackendAdapter` field on its options. When non-nil, the supervisor routes the child process through `Backend.Exec` against the supplied `BackendEnvID` instead of spawning host-side via `exec.Command`. The fallback path (no `BackendAdapter`) keeps the legacy host-exec wiring so the pre-plan-04 lifecycle, signal, and timeout tests continue to drive real subprocesses without constructing a backend. Production code paths (the forthcoming `ai-env run` CLI) always supply a backend.
+The supervisor in `internal/run/supervisor.go` exposes an optional `BackendAdapter` field on its options. When non-nil, the supervisor routes the child process through `Backend.Exec` against the supplied `BackendEnvID` instead of spawning host-side via `exec.Command`. The fallback path (no `BackendAdapter`) keeps the legacy host-exec wiring so the pre-plan-04 lifecycle, signal, and timeout tests continue to drive real subprocesses without constructing a backend. Production code paths (the forthcoming `ai-env run` CLI) always supply a backend. The supervisor also exposes an optional `NetworkPolicyAdapter` plus a `NetworkPolicy` value: when both are set the supervisor calls `Adapter.Apply` during `StateApplyingPolicy` and aborts the run with `StateFailedPolicy` / `stop_reason: policy_failure` on any error, satisfying the master plan's fail-closed contract.
 
 ## Agent launchers
 
@@ -227,10 +239,54 @@ Launchers are stateless: every method takes the inputs it needs explicitly, and 
 The three canonical model-credential modes are defined as constants on `internal/agents/agents.go` and matched verbatim against the strings in `agents.yaml` and `run.json`:
 
 - `backend_managed` is the safe default: the backend injects the provider credential per call, the raw token never enters the agent process environment. Selected when the supervisor's `EnvironmentProbe.BackendManaged` is true.
-- `provider_proxy` points the agent at a host-side provider-compatible proxy. The raw token stays on the host; the sandbox only sees the proxy URL. Selected when the agent supports a custom base URL (Claude and Codex both do) and a proxy URL is configured. The proxy URL plumbing itself is a Plan 05 stub; the resolver does the correct check today.
+- `provider_proxy` points the agent at a host-side provider-compatible proxy. The raw token stays on the host; the sandbox only sees the proxy URL. Selected when the agent supports a custom base URL (Claude and Codex both do) and a proxy URL is configured. Plan 05 shipped the proxy implementation itself in `internal/secrets/proxy.go` and the launcher wire-up in `internal/agents/proxy.go`; the supervisor wires the running proxy into the `EnvironmentProbe` via `WireProviderProxy` before calling `Plan`. See "Provider proxy" below.
 - `raw_env_explicit` injects the raw provider token into the agent's process environment. Selection requires the operator to pass `--allow-raw-model-token-in-sandbox` at run time and to have populated `EnvironmentProbe.RawTokenEnv`. The supervisor records the mode in `run.json` and prints a `reduced safety: yes` warning banner; `ai-env status` surfaces the same line for past runs.
 
 `ResolveCredentialMode` and the lower-level `ResolveCredentialModeDetailed` walk the contract's `Default + FallbackOrder` list in order and return the first mode the host can satisfy. Resolution is fail-closed: when no mode is available, the returned `*CredentialResolutionError` wraps `ErrCredentialModeUnavailable` and carries a per-mode trace explaining why each candidate was rejected (so `ai-env agents doctor` and the supervisor's diagnostics can print every mechanism that was tried). An unknown mode name in `agents.yaml` returns `ErrUnknownCredentialMode` rather than silently skipping the check.
+
+## Network policy enforcement
+
+The canonical runtime view of the outbound network policy lives in `internal/network/`. `NetworkPolicy` is built from the YAML-shaped `config.NetworkPolicy` via `NewNetworkPolicy`, which forces the always-blocked defaults on regardless of what `policy.yaml` says: RFC1918 private ranges (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), the cloud metadata IP (`169.254.169.254/32`), localhost (`127.0.0.0/8` and the hostname `localhost`), and `host.docker.internal`. The operator may widen the allow-domain list in `policy.yaml`; they may not turn off the metadata-IP, private-range, localhost, or `host.docker.internal` block in autonomous mode.
+
+`NetworkPolicy.Validate` enforces the master plan's "fail closed" rule: `default` must be `deny` (autonomous mode rejects `allow`), and all four always-block flags must be true. The supervisor only calls `Adapter.Apply` after `Validate` succeeds; any error from `Apply` lands the run in `StateFailedPolicy` with `stop_reason: policy_failure` so a backend that cannot honor the requested policy never silently degrades into a permissive configuration.
+
+The `NetworkPolicyAdapter` interface lives next to the policy struct so adapters in `internal/backend/*` implement a single small contract (`Name()` plus `Apply(envID, policy)`). Adapters that ship today:
+
+| Adapter | Behavior |
+| ------- | -------- |
+| `docker_sbx.NetworkPolicyAdapter` | Translates the policy into `sbx network apply` flags. Default `deny`, allow domains pinned per entry, always-blocked CIDRs and hosts emitted as explicit block rules. |
+| `docker.NetworkPolicyAdapter` / `podman.NetworkPolicyAdapter` | Structural validator only. `network none` honors every policy trivially; `--unsafe-host-network` rejects deny + allowlist policies because the fallback cannot enforce them. |
+| `mock` backend | Records the `Apply` call so unit tests can assert on supervisor interaction without spawning processes. |
+
+Per-run network events (one JSON object per line: timestamp, destination, decision, source, optional reason and rule) are written into `.ai-env/runs/<run-id>/network-events.jsonl`. `internal/run/network_events.go` is the writer; `internal/run/network_summary.go` aggregates the file into a `NetworkSummary` (totals, allowed / denied counts, top-N destination breakdown) that `ai-env report` and the supervisor's `final-summary.md` writer both consume so the two views agree.
+
+## Provider proxy
+
+The host-side provider proxy in `internal/secrets/proxy.go` keeps raw Anthropic / OpenAI tokens out of the sandbox while still letting the agent reach the real provider. It is NOT a TLS MITM: it speaks plain HTTP on `127.0.0.1` (port picked by the OS unless the caller pins one), the agent inside the sandbox is pointed at it via `ANTHROPIC_BASE_URL` or `OPENAI_BASE_URL` (selected by `internal/agents/proxy.go` based on which provider the proxy fronts), and the proxy itself opens the HTTPS connection upstream so the token only ever travels host -> provider.
+
+Each `ProviderProxy` fronts exactly one provider (one host:scheme tuple, pinned from a short allowlist). A request whose Host header or URL targets a different upstream is rejected with HTTP 502, so an agent cannot pivot through the proxy to an unintended destination. Authentication is host-side: for Anthropic the proxy sets `x-api-key` (and `Authorization: Bearer <token>` for forward compatibility); for OpenAI it sets `Authorization: Bearer <token>`. Every log line the proxy emits passes through a redactor that replaces token-like values with `REDACTED` before the line is written.
+
+Lifecycle is per-run: the supervisor starts the proxy before the agent launches and stops it after the run ends (the default shutdown timeout is two seconds, matching the supervisor's signal grace vocabulary). When the proxy is active, `internal/agents/proxy.go` exposes `WireProviderProxy` which folds the proxy URL plus the provider identifier into the `EnvironmentProbe` the launcher consumes, so the resolver picks `provider_proxy` and the launcher emits exactly one base-URL env var (Anthropic when the proxy fronts Anthropic, OpenAI when it fronts OpenAI).
+
+## Reduced-isolation fallback backends
+
+The `internal/backend/docker` and `internal/backend/podman` adapters are the reduced-isolation fallbacks the master plan calls out when the primary `docker_sbx` adapter is unavailable. Both follow the same posture:
+
+- `Detect` reports `Available=true` only when the binary is on `PATH`, the version probe (`docker version --format ...` or `podman version --format ...`) succeeds, and (for autonomous mode) the operator has passed `--accept-reduced-isolation`. Without acceptance, autonomous mode produces a clear "fallback backend requires --accept-reduced-isolation" message and the verbatim reduced-isolation warning text fixed in the plan.
+- `Start` runs the container with `--network none` by default. `--unsafe-host-network` switches the network mode to `host`, but only when `--accept-reduced-isolation` is also true; without both flags the container is locked to `none` regardless of what `policy.yaml` requests.
+- `ApplyNetworkPolicy` is a structural validator. With `network none` every policy is honored trivially. With `network host` the adapter accepts `default: allow` policies, accepts `default: deny` policies with an empty `allow_domains` list, and rejects `default: deny` + non-empty `allow_domains` (the fallback has no per-destination firewall, so the supervisor fails closed via `failed_policy` rather than silently widening the network).
+- The reduced-isolation warning text (literally `"WARNING: This backend provides reduced isolation. ..."` from plan 05) is printed to the configured warning writer (defaults to stderr) the first time `Detect` observes a state that triggers it. Subsequent `Detect` calls in the same process are no-ops so `ai-env doctor` does not repeat the warning.
+
+The fallbacks are suitable for development and testing on a host without the Docker Sandboxes runtime; they are explicitly NOT recommended for high-risk autonomous execution with untrusted dependencies or secrets.
+
+## Final summary
+
+The supervisor writes `.ai-env/runs/<run-id>/final-summary.md` from `finalizeTerminal` after the closing `run.json` snapshot and the partial-diff collection. The file is atomic (temp + rename) and idempotent (a re-run of the finalize step overwrites it with the latest snapshot). It contains:
+
+1. A header with env name, run id, terminal state, and started / stopped timestamps.
+2. A `## Network` section rendered by `RenderNetworkSummaryMarkdown` from the same `NetworkSummary` `ai-env report` prints: policy status (`applied`, `not attempted`, or `failed` plus the adapter error), default policy, allow domains, blocked CIDRs and hosts, total / allowed / denied event counts, and a top-N destination breakdown.
+
+When the run aborted before the policy stage (the supervisor records `network policy: not attempted`) the section still produces a well-formed block instead of an empty hole. The same renderer feeds the network block of `ai-env report`, so the on-disk markdown and the CLI report cannot drift.
 
 ## Generated configuration files
 
@@ -312,17 +368,26 @@ To customize, set `filesystem.protected_paths` in `policy.yaml`. An explicitly e
 ai-env/
   cmd/ai-env/                 # CLI entry point (Cobra wiring)
   internal/cli/               # Command implementations (RunNew, RunList, RunDiff, RunPatch,
-                              # RunStatus, RunLogs, RunAgentsList/Doctor/Probe)
+                              # RunStatus, RunLogs, RunReport, RunAgentsList/Doctor/Probe)
   internal/config/            # Config structs, YAML loader, validators
   internal/workspace/         # Workspace strategies (worktree, copy), diff, patch, protected matcher
   internal/run/               # Run IDs, run directory layout, state machine, lifecycle.jsonl,
                               # run.json, stream capture, supervisor main loop (with optional
-                              # BackendAdapter seam), signal handling, finalizer, partial-diff
-                              # collection, --continue helper
+                              # BackendAdapter / NetworkPolicyAdapter seams), signal handling,
+                              # finalizer, partial-diff collection, --continue helper,
+                              # network-events.jsonl writer, network summary, final-summary.md
+  internal/network/           # Canonical runtime NetworkPolicy + NetworkPolicyAdapter interface,
+                              # always-blocked CIDR / host slices, Validate, ToBackendPolicy
   internal/backend/           # Backend interface and supporting types
   internal/backend/mock/      # In-memory mock backend used by unit tests
-  internal/backend/docker_sbx/ # Docker Sandboxes adapter (sbx CLI wrapper, compat.go)
-  internal/agents/            # Launcher interface, version/help probes, credential resolver
+  internal/backend/docker_sbx/ # Docker Sandboxes adapter (sbx CLI wrapper, compat.go,
+                              # network_adapter.go)
+  internal/backend/docker/    # Rootless Docker fallback backend (reduced isolation)
+  internal/backend/podman/    # Rootless Podman fallback backend (reduced isolation)
+  internal/secrets/           # Provider proxy (loopback HTTP, host-side auth header injection,
+                              # log redaction, per-run lifecycle)
+  internal/agents/            # Launcher interface, version/help probes, credential resolver,
+                              # provider-proxy wire-up (proxy.go)
   internal/agents/claude/     # Claude Code launcher
   internal/agents/codex/      # Codex launcher
   .github/workflows/          # CI pipeline
