@@ -377,6 +377,7 @@ type Supervisor struct {
 
 	machine *Machine
 	lcWri   *LifecycleWriter
+	netWri  *NetworkEventsWriter
 	streams *StreamCapture
 
 	now func() time.Time
@@ -548,12 +549,30 @@ func NewSupervisor(opts SupervisorOptions) (*Supervisor, error) {
 		return nil, err
 	}
 
+	// Open the network-events.jsonl writer alongside the lifecycle
+	// writer. The two log files share a lifetime: both are opened here,
+	// both are closed in Run's deferred drain, and both must be on disk
+	// before any setup-stage transition writes its first event. Failing
+	// here aborts construction so a misconfigured runDir surfaces at the
+	// same site as the lifecycle writer (rather than later, mid-run, the
+	// first time the supervisor tries to record a network event).
+	netWri, err := OpenNetworkEventsWriter(opts.RunDir, NetworkEventsWriterOptions{
+		RunID:   opts.RunID,
+		Backend: opts.Backend,
+		Now:     now,
+	})
+	if err != nil {
+		_ = lcWri.Close()
+		return nil, err
+	}
+
 	streamOpts := opts.StreamOptions
 	if streamOpts.Now == nil {
 		streamOpts.Now = now
 	}
 	streams, err := OpenStreamCapture(opts.RunDir, streamOpts)
 	if err != nil {
+		_ = netWri.Close()
 		_ = lcWri.Close()
 		return nil, err
 	}
@@ -562,6 +581,7 @@ func NewSupervisor(opts SupervisorOptions) (*Supervisor, error) {
 		opts:     opts,
 		machine:  machine,
 		lcWri:    lcWri,
+		netWri:   netWri,
 		streams:  streams,
 		now:      now,
 		cancelCh: make(chan struct{}),
@@ -636,10 +656,16 @@ func (s *Supervisor) Run(ctx context.Context) (SupervisorResult, error) {
 		return SupervisorResult{}, err
 	}
 	// Resource cleanup always happens, even on the error paths. Close
-	// is idempotent on both sides so the deferred Close inside Run does
-	// not double-free if Run already closed explicitly.
+	// is idempotent on every writer so the deferred Close inside Run
+	// does not double-free if Run already closed explicitly. The
+	// network-events writer is closed alongside the lifecycle writer:
+	// both files share a per-run lifetime and both must flush their
+	// last record before Run returns so an observer reading the run on
+	// disk sees the terminal state and any late policy / outbound
+	// events together.
 	defer func() {
 		_ = s.streams.Close()
+		_ = s.netWri.Close()
 		_ = s.lcWri.Close()
 	}()
 
@@ -864,7 +890,81 @@ func (s *Supervisor) applyNetworkPolicy() error {
 	if envID == "" {
 		return errors.New("run: NetworkPolicyAdapter configured without NetworkPolicyEnvID or BackendEnvID")
 	}
-	return s.opts.NetworkPolicyAdapter.Apply(envID, s.opts.NetworkPolicy)
+
+	// Record the policy-install attempt before invoking the adapter so
+	// the on-disk trail carries the intended policy snapshot even when
+	// Apply errors before emitting its own event (plan 05 step 6:
+	// "receives events from backend where available" - the supervisor
+	// always fills in the policy-lifecycle half itself). Errors from
+	// the writer are best-effort: a network-events log that cannot
+	// accept the attempt event must not gate the actual policy install,
+	// or a degraded log surface would erase the egress controls the
+	// plan requires. The lifecycle.jsonl trail still records the
+	// terminal in StateFailedPolicy / completed so an operator is never
+	// blind to what happened.
+	_ = s.writeNetworkEvent(NetworkEvent{
+		Event: NetworkEventPolicyApplyAttempt,
+		EnvID: envID,
+		Backend: s.opts.NetworkPolicyAdapter.Name(),
+		Default: s.opts.NetworkPolicy.Default,
+		AllowDomains: append([]string(nil), s.opts.NetworkPolicy.AllowDomains...),
+		BlockedCIDRs: s.opts.NetworkPolicy.BlockedCIDRs(),
+		BlockedHosts: s.opts.NetworkPolicy.BlockedHosts(),
+	})
+
+	if err := s.opts.NetworkPolicyAdapter.Apply(envID, s.opts.NetworkPolicy); err != nil {
+		// Failure event carries the same policy snapshot so a reader
+		// who tails network-events.jsonl sees both halves of the
+		// attempt without having to cross-reference an earlier record.
+		// The supervisor returns the err verbatim: the caller in Run
+		// turns it into StateFailedPolicy / StopReasonPolicyFailure.
+		_ = s.writeNetworkEvent(NetworkEvent{
+			Event: NetworkEventPolicyApplyFailed,
+			EnvID: envID,
+			Backend: s.opts.NetworkPolicyAdapter.Name(),
+			Default: s.opts.NetworkPolicy.Default,
+			AllowDomains: append([]string(nil), s.opts.NetworkPolicy.AllowDomains...),
+			BlockedCIDRs: s.opts.NetworkPolicy.BlockedCIDRs(),
+			BlockedHosts: s.opts.NetworkPolicy.BlockedHosts(),
+			Error: err.Error(),
+		})
+		return err
+	}
+
+	_ = s.writeNetworkEvent(NetworkEvent{
+		Event: NetworkEventPolicyApplied,
+		EnvID: envID,
+		Backend: s.opts.NetworkPolicyAdapter.Name(),
+		Default: s.opts.NetworkPolicy.Default,
+		AllowDomains: append([]string(nil), s.opts.NetworkPolicy.AllowDomains...),
+		BlockedCIDRs: s.opts.NetworkPolicy.BlockedCIDRs(),
+		BlockedHosts: s.opts.NetworkPolicy.BlockedHosts(),
+	})
+	return nil
+}
+
+// writeNetworkEvent appends evt to the supervisor's network-events.jsonl
+// writer. It is the single funnel through which the supervisor (and any
+// future backend-event forwarder) records network events: keeping the
+// nil-writer guard and the error-swallow policy in one helper means the
+// rest of the supervisor body does not have to repeat them.
+//
+// The writer is constructed in NewSupervisor and is never nil for a
+// supervisor built via NewSupervisor; the nil guard exists so a test
+// that constructs a Supervisor literal without going through the
+// constructor (an unsupported but possible pattern) does not panic on
+// the first event.
+//
+// Errors from the underlying Write are returned to the caller so a
+// future emitter that wants to surface a write failure can act on it,
+// but the supervisor's own policy-apply call sites swallow the error
+// (see applyNetworkPolicy for the reasoning): a network-events log
+// failure must not gate the policy install or the terminal walk.
+func (s *Supervisor) writeNetworkEvent(evt NetworkEvent) error {
+	if s.netWri == nil {
+		return nil
+	}
+	return s.netWri.Write(evt)
 }
 
 // launchChild starts the configured command, wires stdout/stderr to the
