@@ -2,11 +2,11 @@
 
 `ai-env` is a Go CLI that scaffolds isolated sandbox environments for AI coding agents. It keeps each agent's work in its own workspace and configuration tree under `.ai-env/`, separate from your active working copy.
 
-This repository contains plans 01 through 05: project scaffolding, configuration loading and validation, workspace isolation via Git worktrees or directory copies, diff and patch export, protected path matching, the run-lifecycle supervisor (run IDs, run directory layout, lifecycle state machine, disk-streamed stdout/stderr capture, max-runtime and signal handling, partial-diff collection, and the `--continue` link), the Backend interface with a Docker Sandboxes (`sbx`) adapter, rootless Docker and Podman fallback backends, and an in-memory mock, agent launchers for Claude Code and Codex with version, flag, and credential probing, the `ai-env agents` family of subcommands, the canonical runtime `NetworkPolicy` plus `NetworkPolicyAdapter` interface with fail-closed supervisor wiring, a host-side provider proxy that fronts Anthropic / OpenAI traffic with redacted logs, per-run `network-events.jsonl`, the `ai-env report` subcommand, and the per-run `final-summary.md` that includes the network section. Scanner integration is tracked in later plans.
+This repository contains plans 01 through 06: project scaffolding, configuration loading and validation, workspace isolation via Git worktrees or directory copies, diff and patch export, protected path matching, the run-lifecycle supervisor (run IDs, run directory layout, lifecycle state machine, disk-streamed stdout/stderr capture, max-runtime and signal handling, partial-diff collection, and the `--continue` link), the Backend interface with a Docker Sandboxes (`sbx`) adapter, rootless Docker and Podman fallback backends, and an in-memory mock, agent launchers for Claude Code and Codex with version, flag, and credential probing, the `ai-env agents` family of subcommands, the canonical runtime `NetworkPolicy` plus `NetworkPolicyAdapter` interface with fail-closed supervisor wiring, a host-side provider proxy that fronts Anthropic / OpenAI traffic with redacted logs, per-run `network-events.jsonl`, the `ai-env report` subcommand, the per-run `final-summary.md` that includes the network section, and the scanning and export-gate stack (built-in pattern-only secret scanner, warn-only entropy analyzer, gitleaks adapter, optional external scanner discovery, `ai-env scan` subcommand, and the `ExportGate` wired into `ai-env patch` and `ai-env pr`).
 
 ## Status
 
-Plans 01, 02, 03, 04, and 05 complete. The CLI builds and runs on macOS and Linux, has unit and integration tests for config, scaffold, stack detection, gitignore handling, workspace materialization (Git and non-Git fixtures), diff and patch generation, protected path patterns, run-ID uniqueness within the same second, max-runtime timeout, SIGINT log/diff preservation, `sbx` version compatibility, agent flag selection, credential-mode resolution, the network policy validator, the `docker_sbx` policy adapter, the docker / podman fallback adapters (including the `--accept-reduced-isolation` and `--unsafe-host-network` gates), the provider proxy (loopback bind, upstream domain pin, host-side auth injection, log redaction, shutdown), the `network-events.jsonl` writer and summary, the `ai-env report` renderer, and the `final-summary.md` writer. CI runs `gofmt`, `go vet`, `go test -race`, `staticcheck`, and `govulncheck` via GitHub Actions. Real-backend and real-agent integration tests are gated behind `AI_ENV_BACKEND_INTEGRATION=1` and skip cleanly when their host prerequisites are absent.
+Plans 01, 02, 03, 04, 05, and 06 complete. The CLI builds and runs on macOS and Linux, has unit and integration tests for config, scaffold, stack detection, gitignore handling, workspace materialization (Git and non-Git fixtures), diff and patch generation, protected path patterns, run-ID uniqueness within the same second, max-runtime timeout, SIGINT log/diff preservation, `sbx` version compatibility, agent flag selection, credential-mode resolution, the network policy validator, the `docker_sbx` policy adapter, the docker / podman fallback adapters (including the `--accept-reduced-isolation` and `--unsafe-host-network` gates), the provider proxy (loopback bind, upstream domain pin, host-side auth injection, log redaction, shutdown), the `network-events.jsonl` writer and summary, the `ai-env report` renderer, the `final-summary.md` writer, the built-in pattern scanner (provider API keys, PEM private-key headers, `.env`-style assignments, allowlist comments), the warn-only entropy analyzer, the gitleaks adapter, external-scanner discovery (missing tools warn rather than crash), the `ai-env scan` subcommand, the `ExportGate` (hard vs. configurable blockers, `ModePatch` vs. `ModePR`), and the scan hook wired into the supervisor's `StateScanning` step. CI runs `gofmt`, `go vet`, `go test -race`, `staticcheck`, and `govulncheck` via GitHub Actions. Real-backend and real-agent integration tests are gated behind `AI_ENV_BACKEND_INTEGRATION=1` and skip cleanly when their host prerequisites are absent.
 
 ## Installation
 
@@ -73,15 +73,39 @@ Shows the changes a workspace has accumulated against its baseline.
 
 Output has two stable sections: a header with the env name, strategy, and a per-file summary (each line tagged `[protected]` when the path matches a protected pattern), followed by the unified-diff body. The body is suppressed when `--name-only` is set. Protected-path hits are also re-emitted on stderr as a warning block so scripts piping stdout into a reviewer still get the diff body unchanged. Like `ai-env list`, this command walks upward from the current directory to find the project's `.ai-env/`.
 
-### `ai-env patch <env-name> --out <file>`
+### `ai-env patch <env-name> --out <file> [--run <id>]`
 
 Exports the same diff as `ai-env diff` to a unified-diff patch file suitable for `git apply` or `patch -p1`.
 
-- `--out <file>`: required. Output path for the patch file (resolved relative to the current working directory). The file is always written, even when there are no changes, so callers that test for file existence behave consistently.
-- Protected-path changes do not block export but trigger a stderr warning so reviewers see them.
+- `--out <file>`: required. Output path for the patch file (resolved relative to the current working directory). The file is always written when the gate allows the export, even when there are no changes, so callers that test for file existence behave consistently.
+- `--run <id>`: optional. Pin the export gate to a specific historical run's scan and quarantine inputs. Defaults to the env's latest run.
+- The export gate (see "Export gate" below) is consulted under `ModePatch` before the patch file is written. A hard block (e.g. a high-confidence secret leak, an `.ai-env/**` change, or a quarantined run) refuses the export with a non-zero exit and prints the blocking reasons to stderr; warning-level reasons (e.g. a `.github/workflows/**` change, lockfile change, or large diff) are surfaced but allow the patch through.
+- Protected-path changes do not block export by default but trigger a stderr warning so reviewers see them; setting `review.require_diff_review: true` in `policy.yaml` upgrades them to a block.
 - The copy strategy emits a per-file unified diff so the patch remains applicable even though there is no underlying Git history.
 
-On success the command prints a per-file summary plus a `wrote: <path> (<n> bytes)` line.
+On success the command prints a per-file summary plus a `wrote: <path> (<n> bytes)` line, followed by any gate warnings.
+
+### `ai-env scan <env-name> [--run <id>]`
+
+Runs the built-in pattern-only secret scanner against the workspace diff plus every available external scanner, writes the consolidated artifacts into the env's run directory, and prints a summary. The command is the user-facing surface of plan 06.
+
+- `--run <id>`: optional. Pin the scan artifacts to a specific historical run by its directory basename. Defaults to the env's latest run. The command requires at least one run to exist for the env (`ai-env run` will land in a later plan; until then a placeholder run directory must be present, typically from a previous `ai-env run`-equivalent test).
+- The built-in scanner inspects only the files in the workspace diff (not the whole workspace) and flags high-confidence matches against the pattern classes documented in "Scanning" below. Every built-in finding carries `confidence: high` and `blocks_export: true`, so a single match is enough to refuse a later `ai-env patch` / `ai-env pr` export.
+- Entropy warnings are written into the `entropy_warnings` array of `secret-scan.json`. They are surfaced in the summary but never block export by default; the entropy analyzer is intentionally warn-only in v0.1 to avoid false positives on UUIDs, checksums, generated IDs, and committed test fixtures.
+- External scanners are probed via `exec.LookPath`. Available scanners that have a wired driver (gitleaks today) run automatically; available scanners whose driver lands in a later plan are listed in the summary but not invoked. Unavailable scanners produce a stderr warning ("install to enable") rather than aborting the scan.
+- Two artifacts are written atomically (temp + rename) into `.ai-env/runs/<run-id>/`:
+  - `secret-scan.json`: built-in findings, entropy warnings, and any gitleaks findings.
+  - `dependency-report.json`: list of probed vulnerability / SAST scanners and the findings from the ones that successfully ran.
+
+The summary block is stable (one label per line) and ends with a `result:` line that names the number of blocking findings the gate will see, so `ai-env scan` and a subsequent `ai-env patch` always agree on the verdict.
+
+### `ai-env pr <env-name> [--run <id>]`
+
+Evaluates the export gate for an env under `ModePR`. The actual brokered PR push lands with plan 07; until then the command is the gate-only preview a user runs locally before shipping.
+
+- `--run <id>`: same semantics as `ai-env patch --run`.
+- The gate is run under `ModePR`, which upgrades a `.github/workflows/**` change from a warning (under `ModePatch`) to a hard block. Every other hard blocker (`secret_finding`, `external_secret_finding`, `ai_env_change`, `policy_change`, `quarantine`) fires identically across the two modes.
+- A block verdict prints the blocking reasons to stderr and exits non-zero; an allow verdict prints a per-file preview, any warnings, and a `note: PR push is not yet implemented (wired in plan 07); gate verdict only` line so the operator knows no network call was made.
 
 ### `ai-env status <env-name>`
 
@@ -149,8 +173,8 @@ When the supervisor (`internal/run`) drives a run, it materializes everything un
   network-events.jsonl # one JSON object per network decision (plan 05)
   policy-decisions.jsonl
   git-diff.patch       # partial diff collected on stop
-  secret-scan.json     # populated by scanner (later plans)
-  dependency-report.json
+  secret-scan.json     # built-in + gitleaks scan output (plan 06)
+  dependency-report.json # discovered vulnerability scanners + their results (plan 06)
   security-report.md
   final-summary.md     # written on terminal by the supervisor (plan 05)
   scan-results/        # scanner output subdirectory
@@ -206,7 +230,7 @@ On every terminal the supervisor's finalizer runs an orderly shutdown:
 
 The previous run's workspace is left exactly as the agent left it: no checkout, no reset, no clean. The supervisor's main loop opens the workspace via `workspace.ReadMetadata` at wire time, and that metadata was written once by `ai-env new`, so the agent on the new run sees the workspace in the same state as the previous run left it. The continuation relationship lives only in `run.json`'s `linked_previous_run` field; no special lifecycle event is emitted.
 
-Note: the supervisor primitives, status, logs, list-with-run-state, and `--continue` plumbing all landed in plan 03. The Backend interface, agent launchers, and `ai-env agents` subcommands documented below landed in plan 04 alongside the supervisor's optional `BackendAdapter` seam. Plan 05 added the canonical `NetworkPolicy`, the `NetworkPolicyAdapter` interface, the docker_sbx network adapter, the rootless docker / podman fallback backends, the host-side provider proxy, the `network-events.jsonl` writer, the `ai-env report` subcommand, and the `final-summary.md` writer (with the network section). The user-facing `ai-env run` subcommand that wires the supervisor, the backend, the network adapter, and the provider proxy together end-to-end is tracked in a later plan.
+Note: the supervisor primitives, status, logs, list-with-run-state, and `--continue` plumbing all landed in plan 03. The Backend interface, agent launchers, and `ai-env agents` subcommands documented below landed in plan 04 alongside the supervisor's optional `BackendAdapter` seam. Plan 05 added the canonical `NetworkPolicy`, the `NetworkPolicyAdapter` interface, the docker_sbx network adapter, the rootless docker / podman fallback backends, the host-side provider proxy, the `network-events.jsonl` writer, the `ai-env report` subcommand, and the `final-summary.md` writer (with the network section). Plan 06 added the built-in pattern-only secret scanner, the warn-only entropy analyzer, the gitleaks adapter, optional external scanner discovery, the `ai-env scan` subcommand, the `ExportGate` (wired into `ai-env patch` and `ai-env pr`), and the `ScanHook` seam the supervisor invokes during `StateScanning`. The user-facing `ai-env run` subcommand that wires the supervisor, the backend, the network adapter, the provider proxy, and the scan hook together end-to-end is tracked in a later plan.
 
 ## Backend abstraction
 
@@ -278,6 +302,89 @@ The `internal/backend/docker` and `internal/backend/podman` adapters are the red
 - The reduced-isolation warning text (literally `"WARNING: This backend provides reduced isolation. ..."` from plan 05) is printed to the configured warning writer (defaults to stderr) the first time `Detect` observes a state that triggers it. Subsequent `Detect` calls in the same process are no-ops so `ai-env doctor` does not repeat the warning.
 
 The fallbacks are suitable for development and testing on a host without the Docker Sandboxes runtime; they are explicitly NOT recommended for high-risk autonomous execution with untrusted dependencies or secrets.
+
+## Scanning
+
+The scanning stack lives in `internal/scanners/` and is exposed end-to-end through `ai-env scan`. It is designed to be useful on a host with no external tools installed: the built-in scanner runs in-process, and missing optional scanners warn rather than crash.
+
+### Built-in pattern scanner
+
+The built-in scanner walks the changed files in the workspace diff (not the full workspace; legacy data committed before the env was created stays out of the v0.1 output) and emits a `Finding` for each line that matches one of:
+
+- Provider API keys: OpenAI (`sk-...`), Anthropic (`sk-ant-...`), GitHub (`ghp_...`, `github_pat_...`), npm, PyPI, AWS (`AKIA...`), Google Cloud, Azure, Slack, Stripe.
+- PEM-style private key headers: `-----BEGIN RSA PRIVATE KEY-----`, `-----BEGIN EC PRIVATE KEY-----`, `-----BEGIN OPENSSH PRIVATE KEY-----`, and the generic `-----BEGIN PRIVATE KEY-----` header.
+- `.env`-style assignments whose key name strongly implies a secret (`*_SECRET=`, `*_TOKEN=`, `*_KEY=`, `PASSWORD=`) with a non-empty value.
+- User-configured custom regex patterns from `policy.yaml`'s `scanners.custom_patterns` list (additive: the built-in classes always remain in effect).
+
+Every built-in finding is stamped `confidence: high` and `blocks_export: true`. There are no medium- or low-confidence findings in v0.1: a built-in match is, by construction, a hard block. Two allowlist channels suppress a finding before it is emitted:
+
+- An inline `# ai-env-scan-ignore` comment on the same line (the marker is matched as a substring so `// ai-env-scan-ignore` or `<!-- ai-env-scan-ignore -->` work too).
+- A regex in `policy.yaml`'s `scanners.allowlist` list.
+
+The scanner reads at most a fixed cap of bytes per file so a hostile agent cannot wedge a scan by dropping a huge binary into the diff; files larger than the cap are flagged as `entropy_only=false` informational entries rather than scanned in full.
+
+### Entropy analyzer (warn-only)
+
+A separate entropy pass runs alongside the pattern scanner and flags string literals whose Shannon entropy exceeds a built-in threshold. Hits land in the `entropy_warnings` array of `secret-scan.json`; they are surfaced by `ai-env scan` and the export gate's render but never block export by default. This is the plan's "warn vs. block" split: entropy alone is too noisy to gate on (UUIDs, hashes, base64 fixtures, generated IDs) so the analyzer is informational in v0.1.
+
+### External scanner discovery
+
+`internal/scanners/external.go` keeps a registry of optional tools and probes each with `exec.LookPath` at discovery time (no `tool --version` call: discovery must stay cheap and a wedged binary on PATH must not stall `ai-env scan`). The current registry covers:
+
+| Tool          | Kind             | Status in v0.1                          |
+| ------------- | ---------------- | --------------------------------------- |
+| `gitleaks`    | secrets          | wired (`gitleaks detect` JSON adapter)  |
+| `osv-scanner` | vulnerabilities  | discovered only, driver lands in plan 07 |
+| `trivy`       | vulnerabilities  | discovered only, driver lands in plan 07 |
+| `semgrep`     | SAST             | discovered only, driver lands in plan 07 |
+| `npm-audit`   | vulnerabilities  | discovered only, driver lands in plan 07 |
+| `pip-audit`   | vulnerabilities  | discovered only, driver lands in plan 07 |
+| `cargo-audit` | vulnerabilities  | discovered only, driver lands in plan 07 |
+| `govulncheck` | vulnerabilities  | discovered only, driver lands in plan 07 |
+
+Each entry reports `available: true|false` plus a human-readable message. The CLI summary lists available scanners with findings counts and prints a single stderr warning block listing the unavailable ones; a missing tool is never an error. Gitleaks findings are normalized into the same `Finding` shape the built-in scanner uses (one `finding_NNN` ID per hit, `confidence: high`, `blocks_export: true`), so the export gate treats them as a hard secret block regardless of source.
+
+The default external-scanner timeout is ten minutes per tool; the supervisor's own scan-hook deadline (five minutes default for the whole hook) bounds the worst case more aggressively when scans run inline from the run lifecycle.
+
+## Export gate
+
+The export gate in `internal/export/` is the single decision point sitting between a finished run and the user-visible export surfaces. `ai-env patch` calls it under `ModePatch`; `ai-env pr` calls it under `ModePR`. The gate is a pure function: the caller assembles an `export.Input` from disk (workspace diff, scan artifacts, policy, run record) and the gate returns a `GateResult` carrying a `Decision` (`allow` or `block`) and an ordered slice of `Reason` entries.
+
+### Hard blockers (cannot be overridden by default)
+
+| ReasonCode                  | Trigger                                                                 |
+| --------------------------- | ----------------------------------------------------------------------- |
+| `secret_finding`            | Any built-in scanner finding with `blocks_export: true`.                |
+| `external_secret_finding`   | Any gitleaks finding with `blocks_export: true`.                        |
+| `ai_env_change`             | Diff touches any path under `.ai-env/`.                                 |
+| `policy_change`             | Diff touches `.ai-env/policy.yaml` specifically (also fires `ai_env_change`, surfaced separately so the CLI can render a more specific message). |
+| `workflow_change`           | Diff touches `.github/workflows/**`. Block under `ModePR`, warn under `ModePatch` so a local patch can still be inspected. |
+| `quarantine`                | The run record's state is `quarantined`.                                |
+
+### Configurable blockers (toggled from `policy.yaml`)
+
+These rules always fire as a `Reason`; what changes is whether the severity is `block` or `warn`. The current v0.1 wiring ties them to `policy.review.require_diff_review` (a single switch flips all four to `block`); `policy.review.fail_on_high_vulnerability` governs the vulnerability rule independently and defaults to `true`.
+
+| ReasonCode                    | Default severity | Configured via                          |
+| ----------------------------- | ---------------- | --------------------------------------- |
+| `high_severity_vulnerability` | block            | `policy.review.fail_on_high_vulnerability` |
+| `protected_path`              | warn             | `policy.review.require_diff_review`     |
+| `large_diff`                  | warn (>1000 lines threshold) | `policy.review.require_diff_review` |
+| `lockfile_change`             | warn             | `policy.review.require_diff_review`     |
+| `new_executable_file`         | warn             | `policy.review.require_diff_review`     |
+
+A `Reason` carries `Hard: true` for hard blockers and `Hard: false` for configurable blockers so the CLI can render the "this is a default-on rule" vs. "your policy says to block on this" distinction. `GateResult.Blocked()`, `GateResult.BlockingReasons()`, and `GateResult.Warnings()` are the helpers the CLI uses to render the verdict in the same shape both `ai-env patch` and `ai-env pr` print.
+
+### Scan hook in the run lifecycle
+
+`internal/run/scan_hook.go` exposes a `ScanHook func(ctx, runDir) error` seam on `SupervisorOptions`. When non-nil the supervisor invokes the hook exactly once during `StateScanning`, after the agent stopped and before `StateReporting`. The hook is responsible for materializing `secret-scan.json` and `dependency-report.json` inside the run directory; the export gate reads them afterwards via `run.SecretScanPath` so the on-disk shape stays the single source of truth.
+
+The contract is deliberate:
+
+- Findings are not failures. A scanner that wrote `secret-scan.json` with blocking findings returns `nil`; the run still ends in `StateCompleted` and remains inspectable. The gate (consulted later by `ai-env patch` / `ai-env pr`) is the surface that refuses the diff.
+- Infrastructure failures are. A non-nil hook error diverts the run to `StateFailedScan` with `stop_reason: scan_failure`.
+- The hook only runs on the happy path. Timeouts, idle kills, SIGINT, `failed_agent`, `failed_backend`, and `failed_policy` transitions never reach `StateScanning`, by design: the agent never produced a completion edge there is nothing to scan.
+- The hook is bounded by `SupervisorOptions.ScanTimeout` (default five minutes). A wedged external scanner cannot block the supervisor's terminal walk indefinitely.
 
 ## Final summary
 
@@ -368,14 +475,16 @@ To customize, set `filesystem.protected_paths` in `policy.yaml`. An explicitly e
 ai-env/
   cmd/ai-env/                 # CLI entry point (Cobra wiring)
   internal/cli/               # Command implementations (RunNew, RunList, RunDiff, RunPatch,
-                              # RunStatus, RunLogs, RunReport, RunAgentsList/Doctor/Probe)
+                              # RunPR, RunScan, RunStatus, RunLogs, RunReport,
+                              # RunAgentsList/Doctor/Probe)
   internal/config/            # Config structs, YAML loader, validators
   internal/workspace/         # Workspace strategies (worktree, copy), diff, patch, protected matcher
   internal/run/               # Run IDs, run directory layout, state machine, lifecycle.jsonl,
                               # run.json, stream capture, supervisor main loop (with optional
-                              # BackendAdapter / NetworkPolicyAdapter seams), signal handling,
-                              # finalizer, partial-diff collection, --continue helper,
-                              # network-events.jsonl writer, network summary, final-summary.md
+                              # BackendAdapter / NetworkPolicyAdapter / ScanHook seams),
+                              # signal handling, finalizer, partial-diff collection,
+                              # --continue helper, network-events.jsonl writer, network
+                              # summary, final-summary.md, scan-hook driver
   internal/network/           # Canonical runtime NetworkPolicy + NetworkPolicyAdapter interface,
                               # always-blocked CIDR / host slices, Validate, ToBackendPolicy
   internal/backend/           # Backend interface and supporting types
@@ -390,6 +499,11 @@ ai-env/
                               # provider-proxy wire-up (proxy.go)
   internal/agents/claude/     # Claude Code launcher
   internal/agents/codex/      # Codex launcher
+  internal/scanners/          # ScanRunner interface, built-in pattern scanner,
+                              # warn-only entropy analyzer, external scanner
+                              # discovery, gitleaks adapter
+  internal/export/            # ExportGate (hard + configurable blockers,
+                              # ModePatch / ModePR, GateResult)
   .github/workflows/          # CI pipeline
   plan.md                     # Current plan in progress
   plans/                      # Historical planning artifacts
