@@ -1456,6 +1456,20 @@ func (s *Supervisor) finalizeTerminal(cause terminalCause, exit exitInfo) Superv
 	// terminal record even if this rewrite fails.
 	_ = s.writeRecordSnapshot(final, codePtr, &reason, &stopped)
 
+	// Final summary. Plan 05 task 12 calls for a network summary in
+	// final-summary.md so a post-run reviewer can see the policy outcome
+	// and outbound decisions without parsing network-events.jsonl.
+	// Read the network events from disk (the supervisor's own writer
+	// already flushed them) and fold them into a NetworkSummary, then
+	// hand the result to WriteFinalSummary. Errors here are advisory:
+	// they do NOT change the terminal state; the placeholder file
+	// CreateRunDirectory left in place is the fallback record.
+	if err := s.writeFinalSummary(final); err != nil {
+		if s.opts.UserOutput != nil {
+			_, _ = fmt.Fprintf(s.opts.UserOutput, "ai-env: warning: final summary write failed: %v\n", err)
+		}
+	}
+
 	// Print the `--continue` suggestion if the terminal supports it.
 	// The exact line is the master plan's "ai-env run <env-name>
 	// --continue"; we record it on the result so a programmatic caller
@@ -1474,6 +1488,35 @@ func (s *Supervisor) finalizeTerminal(cause terminalCause, exit exitInfo) Superv
 		ContinueSuggestion: suggestion,
 		PartialDiffPath:    GitDiffPath(s.opts.RunDir),
 	}
+}
+
+// writeFinalSummary loads the supervisor's run-local network event log
+// from disk, folds it into a NetworkSummary, and hands the result to
+// WriteFinalSummary so the on-disk final-summary.md ends up with the
+// canonical network section (plan 05 task 12).
+//
+// The supervisor's own NetworkEventsWriter has already flushed every
+// event by the time finalizeTerminal calls this helper (the Sync after
+// every Write is the explicit invariant), so re-reading the file on
+// disk is the simplest path: the writer does not need a separate
+// snapshot API, and a future out-of-process emitter that appends to
+// the same file (e.g. a backend-side forwarder) is included
+// automatically.
+//
+// Returns the underlying error so finalizeTerminal can surface it via
+// UserOutput. The terminal state is never changed: the placeholder
+// CreateRunDirectory left behind is the fallback record.
+func (s *Supervisor) writeFinalSummary(final State) error {
+	events, _ := ReadNetworkEvents(s.opts.RunDir)
+	summary := SummarizeNetworkEvents(events)
+	return WriteFinalSummary(s.opts.RunDir, FinalSummaryInput{
+		EnvName:   s.opts.EnvName,
+		RunID:     s.opts.RunID,
+		State:     final,
+		StartedAt: s.startedAt,
+		StoppedAt: s.stoppedAt,
+		Network:   summary,
+	})
 }
 
 // writeRecordSnapshot rewrites run.json with the latest state. The

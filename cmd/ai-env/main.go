@@ -40,9 +40,43 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(newPatchCmd())
 	root.AddCommand(newStatusCmd())
 	root.AddCommand(newLogsCmd())
+	root.AddCommand(newReportCmd())
 	root.AddCommand(newAgentsCmd())
 
 	return root
+}
+
+// newReportCmd builds the `ai-env report` subcommand. Flag parsing
+// happens here; the report logic lives in internal/cli so it can be
+// exercised without Cobra wiring. The command surfaces the network
+// summary alongside the run handle so an operator who tails a run
+// landing terminal can audit policy outcome + per-destination
+// decisions without parsing JSONL by hand (plan 05 task 7 / task 12).
+func newReportCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "report <env-name>",
+		Short: "Print a run report including the network summary",
+		Long: "Print a run report for an env, summarizing the run's state, " +
+			"timing, and the network policy outcome (allowed / denied " +
+			"counts, top destinations). Reads network-events.jsonl and " +
+			"folds it into the same summary the supervisor writes into " +
+			"final-summary.md, so the two views agree.",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			runID, err := cmd.Flags().GetString("run")
+			if err != nil {
+				return fmt.Errorf("ai-env report: read --run: %w", err)
+			}
+			return cli.RunReport(cli.ReportOptions{
+				EnvName: args[0],
+				RunID:   runID,
+				Stdout:  cmd.OutOrStdout(),
+				Stderr:  cmd.ErrOrStderr(),
+			})
+		},
+	}
+	cmd.Flags().String("run", "", "Specific run id to report on (defaults to the env's latest run)")
+	return cmd
 }
 
 // newAgentsCmd builds the `ai-env agents` parent command and attaches

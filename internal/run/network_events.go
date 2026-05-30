@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 )
@@ -394,4 +395,269 @@ func (w *NetworkEventsWriter) Close() error {
 		return fmt.Errorf("run: close network events log: %w", err)
 	}
 	return nil
+}
+
+// NetworkEventsPath returns the absolute path of the network-events.jsonl
+// file inside runDir. Mirrors LifecyclePath / GitDiffPath so callers
+// (status / report / final-summary) have a single helper for the layout.
+func NetworkEventsPath(runDir string) string {
+	return filepath.Join(runDir, networkEventsFileName)
+}
+
+// ReadNetworkEvents loads every NetworkEvent recorded in runDir's
+// network-events.jsonl, in the order they were appended. Blank lines
+// (e.g. a trailing newline at EOF) are skipped silently.
+//
+// ReadNetworkEvents returns an empty slice and nil when the file exists
+// but is empty (the post-CreateRunDirectory placeholder state) or
+// absent. A malformed line returns the events read so far plus the
+// parse error so a caller can still surface the partial trail.
+//
+// Mirrors ReadLifecycleEvents: the file is small in practice (policy
+// install + occasional per-destination decisions), so the whole-file
+// read is preferable to a streaming parser.
+func ReadNetworkEvents(runDir string) ([]NetworkEvent, error) {
+	if runDir == "" {
+		return nil, errors.New("run: ReadNetworkEvents requires runDir")
+	}
+	path := NetworkEventsPath(runDir)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("run: read network events %s: %w", path, err)
+	}
+	if len(data) == 0 {
+		return nil, nil
+	}
+	return parseNetworkEvents(data, path)
+}
+
+// parseNetworkEvents decodes data as JSONL network events. Split out so
+// ReadNetworkEvents can stay tiny and so tests can exercise the parser
+// against in-memory byte slices.
+func parseNetworkEvents(data []byte, path string) ([]NetworkEvent, error) {
+	out := make([]NetworkEvent, 0, 16)
+	for i, line := range splitJSONLines(data) {
+		if len(line) == 0 {
+			continue
+		}
+		var evt NetworkEvent
+		if err := json.Unmarshal(line, &evt); err != nil {
+			return out, fmt.Errorf("run: parse %s line %d: %w", path, i+1, err)
+		}
+		out = append(out, evt)
+	}
+	return out, nil
+}
+
+// NetworkSummary is the aggregated view of the network-events.jsonl
+// stream that `ai-env report` and the final-summary.md writer print.
+//
+// It folds the policy-lifecycle events into a single status (attempted /
+// applied / failed) plus the policy snapshot fields, and the
+// per-destination events into allow / deny counters with top-destination
+// lists. Producing the summary by aggregation (rather than passing the
+// raw events through to the renderer) means the two callers share the
+// same shape and the same ordering rules, so the report and the
+// final-summary always agree on the numbers.
+type NetworkSummary struct {
+	// Total is the total number of events recorded in
+	// network-events.jsonl. Zero when no events were emitted (the
+	// post-CreateRunDirectory placeholder state, or a backend that did
+	// not surface any events).
+	Total int
+
+	// PolicyStatus is the last policy-lifecycle verb observed, one of
+	// "not_attempted", "attempt", "applied", "failed". A run that never
+	// reached the applying_policy stage carries "not_attempted" so a
+	// reader can distinguish "policy not installed" from "policy install
+	// in flight".
+	PolicyStatus string
+
+	// PolicyError is the Error string from the most recent
+	// policy_apply_failed event, when PolicyStatus is "failed". Empty
+	// otherwise.
+	PolicyError string
+
+	// Default is the default outbound stance the policy carried at
+	// install time ("deny" / "allow"). Sourced from the latest
+	// policy-lifecycle event so a re-apply during the run shows the
+	// final policy. Empty when no policy event was recorded.
+	Default string
+
+	// AllowDomains is the allow-list the policy installed. Sourced from
+	// the latest policy-lifecycle event. The slice is a fresh copy so
+	// callers may sort or filter without disturbing the underlying
+	// event records.
+	AllowDomains []string
+
+	// BlockedCIDRs is the CIDR block list installed. Sourced from the
+	// latest policy-lifecycle event.
+	BlockedCIDRs []string
+
+	// BlockedHosts is the hostname block list installed. Sourced from
+	// the latest policy-lifecycle event.
+	BlockedHosts []string
+
+	// AllowedCount is the number of outbound_allowed events.
+	AllowedCount int
+
+	// DeniedCount is the number of outbound_blocked events.
+	DeniedCount int
+
+	// TopAllowed is the top-N destinations the backend allowed, sorted
+	// by occurrence count descending then destination ascending. Caps at
+	// NetworkSummaryTopN entries.
+	TopAllowed []NetworkSummaryDestination
+
+	// TopDenied is the top-N destinations the backend denied, sorted by
+	// occurrence count descending then destination ascending. Caps at
+	// NetworkSummaryTopN entries.
+	TopDenied []NetworkSummaryDestination
+}
+
+// NetworkSummaryDestination is one (destination, count) entry in the
+// top-N destination lists carried by NetworkSummary.
+type NetworkSummaryDestination struct {
+	// Destination is the host / "host:port" / CIDR string the backend
+	// emitted on the per-destination event.
+	Destination string
+
+	// Count is the number of events for Destination in the relevant
+	// bucket (allowed or denied).
+	Count int
+}
+
+// NetworkSummaryTopN caps how many destinations the TopAllowed /
+// TopDenied lists carry. Ten is enough to surface the recurring
+// destinations in a typical agent run without burying the report in a
+// long tail.
+const NetworkSummaryTopN = 10
+
+// NetworkSummaryPolicyNotAttempted is the PolicyStatus value used when
+// no policy_apply_* event was recorded. Pinned as a constant so the
+// renderer and tests compare against the canonical token.
+const NetworkSummaryPolicyNotAttempted = "not_attempted"
+
+// SummarizeNetworkEvents folds events into a NetworkSummary. The folding
+// rules are:
+//
+//   - PolicyStatus tracks the last policy_apply_* verb. "attempt" wins
+//     until either "applied" or "failed" arrives; a later re-apply with
+//     a fresh "attempt" overwrites the prior verdict so the summary
+//     reflects the most recent install attempt. PolicyError is reset
+//     when a non-failed verb arrives.
+//   - Default / AllowDomains / BlockedCIDRs / BlockedHosts are taken
+//     from the most recent policy-lifecycle event that carried them
+//     (the attempt and applied events both carry the snapshot; failed
+//     events may or may not).
+//   - AllowedCount / DeniedCount tally the per-destination events.
+//   - TopAllowed / TopDenied are the top NetworkSummaryTopN
+//     destinations by occurrence count, sorted descending by count
+//     then ascending by destination so the output is deterministic.
+//
+// An empty events slice produces a zero-valued summary with
+// PolicyStatus = NetworkSummaryPolicyNotAttempted.
+func SummarizeNetworkEvents(events []NetworkEvent) NetworkSummary {
+	s := NetworkSummary{
+		Total:        len(events),
+		PolicyStatus: NetworkSummaryPolicyNotAttempted,
+	}
+	allowedCounts := make(map[string]int)
+	deniedCounts := make(map[string]int)
+
+	for _, evt := range events {
+		switch evt.Event {
+		case NetworkEventPolicyApplyAttempt:
+			s.PolicyStatus = "attempt"
+			s.PolicyError = ""
+			s.Default = evt.Default
+			s.AllowDomains = copyStrings(evt.AllowDomains)
+			s.BlockedCIDRs = copyStrings(evt.BlockedCIDRs)
+			s.BlockedHosts = copyStrings(evt.BlockedHosts)
+		case NetworkEventPolicyApplied:
+			s.PolicyStatus = "applied"
+			s.PolicyError = ""
+			if evt.Default != "" {
+				s.Default = evt.Default
+			}
+			if len(evt.AllowDomains) > 0 {
+				s.AllowDomains = copyStrings(evt.AllowDomains)
+			}
+			if len(evt.BlockedCIDRs) > 0 {
+				s.BlockedCIDRs = copyStrings(evt.BlockedCIDRs)
+			}
+			if len(evt.BlockedHosts) > 0 {
+				s.BlockedHosts = copyStrings(evt.BlockedHosts)
+			}
+		case NetworkEventPolicyApplyFailed:
+			s.PolicyStatus = "failed"
+			s.PolicyError = evt.Error
+			if evt.Default != "" {
+				s.Default = evt.Default
+			}
+			if len(evt.AllowDomains) > 0 {
+				s.AllowDomains = copyStrings(evt.AllowDomains)
+			}
+			if len(evt.BlockedCIDRs) > 0 {
+				s.BlockedCIDRs = copyStrings(evt.BlockedCIDRs)
+			}
+			if len(evt.BlockedHosts) > 0 {
+				s.BlockedHosts = copyStrings(evt.BlockedHosts)
+			}
+		case NetworkEventOutboundAllowed:
+			s.AllowedCount++
+			if evt.Destination != "" {
+				allowedCounts[evt.Destination]++
+			}
+		case NetworkEventOutboundBlocked:
+			s.DeniedCount++
+			if evt.Destination != "" {
+				deniedCounts[evt.Destination]++
+			}
+		}
+	}
+
+	s.TopAllowed = topDestinations(allowedCounts, NetworkSummaryTopN)
+	s.TopDenied = topDestinations(deniedCounts, NetworkSummaryTopN)
+	return s
+}
+
+// topDestinations turns a (destination -> count) map into the top-N
+// list, sorted by count descending then destination ascending so the
+// output is deterministic across calls and across runs that emit the
+// same events.
+func topDestinations(counts map[string]int, top int) []NetworkSummaryDestination {
+	if len(counts) == 0 || top <= 0 {
+		return nil
+	}
+	all := make([]NetworkSummaryDestination, 0, len(counts))
+	for dest, c := range counts {
+		all = append(all, NetworkSummaryDestination{Destination: dest, Count: c})
+	}
+	sort.Slice(all, func(i, j int) bool {
+		if all[i].Count != all[j].Count {
+			return all[i].Count > all[j].Count
+		}
+		return all[i].Destination < all[j].Destination
+	})
+	if len(all) > top {
+		all = all[:top]
+	}
+	return all
+}
+
+// copyStrings returns a fresh slice that aliases none of the input's
+// backing array. Used by SummarizeNetworkEvents so a caller cannot
+// mutate the policy snapshot fields carried on the summary by
+// modifying the event record (or vice versa).
+func copyStrings(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]string, len(in))
+	copy(out, in)
+	return out
 }
