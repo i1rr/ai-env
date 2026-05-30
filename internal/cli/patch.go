@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/rivan1986/ai-env/internal/export"
 	"github.com/rivan1986/ai-env/internal/workspace"
 )
 
@@ -23,6 +24,12 @@ type PatchOptions struct {
 	// error; the CLI wiring marks --out required so this only triggers if a
 	// caller (e.g. a test) bypasses Cobra and forgets to set it.
 	OutputPath string
+
+	// RunID, when non-empty, pins the export to a specific historical run
+	// for the purposes of the gate's scan / quarantine inputs. Defaults
+	// to the env's latest run, mirroring `ai-env scan` and `ai-env
+	// report`.
+	RunID string
 
 	// Cwd is the working directory the command was invoked from. RunPatch
 	// walks upward from Cwd looking for the project's .ai-env/ directory
@@ -45,8 +52,13 @@ type PatchOptions struct {
 // RunPatch is the entry point used by the Cobra wiring for `ai-env patch`.
 // It mirrors the structure of RunDiff: locate the project's .ai-env/
 // directory, load the protected-path matcher, ask the workspace layer for
-// the diff, then write DiffResult.Unified to OutputPath. Per plan 02 step 6:
+// the diff, then write DiffResult.Unified to OutputPath. Per plan 02 step 6
+// and plan 06 step 8:
 //
+//   - The export gate (plan 06) is consulted before the patch file is
+//     written: a block verdict refuses the export and prints the
+//     blocking reasons to stderr so the operator knows what the gate
+//     observed.
 //   - The emitted file is a unified-diff patch (DiffResult.Unified is the
 //     same text the diff command displays, suitable for `git apply` or
 //     `patch -p1`).
@@ -87,17 +99,24 @@ func RunPatch(opts PatchOptions) error {
 		return fmt.Errorf("ai-env patch: %w", err)
 	}
 
-	matcher, mErr := loadProtectedMatcher(aiEnvDir)
-	if mErr != nil {
-		// A malformed policy.yaml should not silently disable
-		// protected-path warnings; surface the parse error rather than
-		// pretending nothing was configured. This mirrors RunDiff.
-		return fmt.Errorf("ai-env patch: %w", mErr)
-	}
-
-	result, err := workspace.Diff(aiEnvDir, opts.EnvName, matcher)
+	inputs, err := loadExportInputs(aiEnvDir, opts.EnvName, opts.RunID)
 	if err != nil {
 		return fmt.Errorf("ai-env patch: %w", err)
+	}
+
+	gate := export.NewExportGate(inputs.Policy)
+	verdict := gate.Evaluate(export.Input{
+		Mode:            export.ModePatch,
+		Diff:            inputs.Diff,
+		BuiltInResult:   inputs.BuiltInResult,
+		ExternalResults: inputs.ExternalResults,
+		Policy:          inputs.Policy,
+		Record:          inputs.Record,
+	})
+
+	if verdict.Blocked() {
+		renderGateResult(opts.Stdout, opts.Stderr, "ai-env patch", verdict)
+		return fmt.Errorf("ai-env patch: export blocked by %d reason(s); see stderr for details", len(verdict.BlockingReasons()))
 	}
 
 	// Resolve --out relative to the original working directory, not to
@@ -111,11 +130,12 @@ func RunPatch(opts PatchOptions) error {
 		outAbs = filepath.Join(opts.Cwd, outAbs)
 	}
 
-	if err := writePatchFile(outAbs, result.Unified); err != nil {
+	if err := writePatchFile(outAbs, inputs.Diff.Unified); err != nil {
 		return fmt.Errorf("ai-env patch: %w", err)
 	}
 
-	renderPatchResult(opts.Stdout, opts.Stderr, result, outAbs)
+	renderPatchResult(opts.Stdout, opts.Stderr, inputs.Diff, outAbs)
+	renderGateResult(opts.Stdout, opts.Stderr, "ai-env patch", verdict)
 	return nil
 }
 

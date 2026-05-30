@@ -38,6 +38,7 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(newListCmd())
 	root.AddCommand(newDiffCmd())
 	root.AddCommand(newPatchCmd())
+	root.AddCommand(newPRCmd())
 	root.AddCommand(newStatusCmd())
 	root.AddCommand(newLogsCmd())
 	root.AddCommand(newReportCmd())
@@ -277,23 +278,67 @@ func newPatchCmd() *cobra.Command {
 			"git diff between the env branch and the source repo's HEAD; for " +
 			"copy-strategy envs it is a file-level unified diff against the " +
 			"read-only baseline snapshot. Protected-path changes do not block " +
-			"export but trigger a warning so reviewers see them.",
+			"export but trigger a warning so reviewers see them. The export " +
+			"gate (plan 06) is consulted before the patch is written; a hard " +
+			"blocker (e.g. a high-confidence secret leak) refuses the export.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			outPath, err := cmd.Flags().GetString("out")
 			if err != nil {
 				return fmt.Errorf("ai-env patch: read --out: %w", err)
 			}
+			runID, err := cmd.Flags().GetString("run")
+			if err != nil {
+				return fmt.Errorf("ai-env patch: read --run: %w", err)
+			}
 			return cli.RunPatch(cli.PatchOptions{
 				EnvName:    args[0],
 				OutputPath: outPath,
+				RunID:      runID,
 				Stdout:     cmd.OutOrStdout(),
 				Stderr:     cmd.ErrOrStderr(),
 			})
 		},
 	}
 	cmd.Flags().String("out", "", "Path to write the unified-diff patch to (required)")
+	cmd.Flags().String("run", "", "Specific run id whose scan / record the export gate consults (defaults to the env's latest run)")
 	_ = cmd.MarkFlagRequired("out")
+	return cmd
+}
+
+// newPRCmd builds the `ai-env pr` subcommand. Flag parsing happens here;
+// the actual export logic lives in internal/cli so it can be tested
+// without involving Cobra. Plan 06 step 8 wires the export gate into
+// this command as a stub: the gate is evaluated under ModePR (so
+// workflow changes and other PR-only hard blockers fire), but the
+// brokered PR push itself is implemented in Plan 07.
+func newPRCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "pr <env-name>",
+		Short: "Evaluate the export gate for an ai-env workspace under PR mode",
+		Long: "Evaluate the export gate for an ai-env workspace as if its " +
+			"diff were about to be shipped through the brokered PR path. " +
+			"All hard blockers (secret leaks, workflow changes, .ai-env " +
+			"modifications, quarantine) refuse the export with a non-zero " +
+			"exit. The actual PR push to the host (creating the brokered " +
+			"branch, opening the pull request) is wired in plan 07; until " +
+			"then this command surfaces the gate verdict so an operator " +
+			"can preview the decision locally.",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			runID, err := cmd.Flags().GetString("run")
+			if err != nil {
+				return fmt.Errorf("ai-env pr: read --run: %w", err)
+			}
+			return cli.RunPR(cli.PROptions{
+				EnvName: args[0],
+				RunID:   runID,
+				Stdout:  cmd.OutOrStdout(),
+				Stderr:  cmd.ErrOrStderr(),
+			})
+		},
+	}
+	cmd.Flags().String("run", "", "Specific run id whose scan / record the export gate consults (defaults to the env's latest run)")
 	return cmd
 }
 
