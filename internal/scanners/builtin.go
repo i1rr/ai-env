@@ -76,6 +76,19 @@ type Config struct {
 	// pattern matchers run. The plan documents this as the "entries in
 	// policy.yaml" half of the allowlist contract.
 	Allowlist []string
+
+	// EntropyThreshold overrides the bits-per-character cutoff the
+	// warn-only entropy analyzer uses for base64-shaped substrings. A
+	// zero value means "use the built-in default" (see entropy.go).
+	// The analyzer never produces a blocking finding regardless of
+	// threshold; this knob only tunes how aggressively warnings are
+	// emitted.
+	EntropyThreshold float64
+
+	// HexEntropyThreshold overrides the bits-per-character cutoff for
+	// hex-only substrings. A zero value means "use the built-in
+	// default". Same warn-only contract as EntropyThreshold.
+	HexEntropyThreshold float64
 }
 
 // BuiltIn is the concrete ScanRunner used when no external scanner is
@@ -92,6 +105,7 @@ type BuiltIn struct {
 	patterns       []patternRule
 	customPatterns []patternRule
 	allowlist      []*regexp.Regexp
+	entropy        *entropyAnalyzer
 }
 
 // Compile-time check that *BuiltIn satisfies ScanRunner. Step 2 only
@@ -128,7 +142,10 @@ type patternRule struct {
 // is valid: the resulting BuiltIn runs the built-in pattern set with
 // no allowlist and no custom patterns.
 func NewBuiltIn(cfg Config) (*BuiltIn, error) {
-	b := &BuiltIn{patterns: builtinPatterns()}
+	b := &BuiltIn{
+		patterns: builtinPatterns(),
+		entropy:  newEntropyAnalyzer(cfg),
+	}
 
 	for i, expr := range cfg.CustomPatterns {
 		re, err := regexp.Compile(expr)
@@ -189,8 +206,9 @@ func (b *BuiltIn) RunBuiltIn(workspacePath string, diff workspace.DiffResult) (S
 
 	for _, rel := range targets {
 		abs := filepath.Join(workspacePath, rel)
-		findings := b.scanFile(abs, rel, len(result.Findings)+1)
+		findings, warnings := b.scanFile(abs, rel, len(result.Findings)+1)
 		result.Findings = append(result.Findings, findings...)
+		result.EntropyWarnings = append(result.EntropyWarnings, warnings...)
 	}
 
 	return result, nil
@@ -257,27 +275,34 @@ func (b *BuiltIn) targets(workspacePath string, diff workspace.DiffResult) []str
 }
 
 // scanFile runs every pattern rule against the file at abs and
-// returns the matched Findings. nextID is the running counter the
-// caller threads through so finding_001 / finding_002 / ... are
-// stable across the whole ScanResult.
+// returns the matched Findings plus the warn-only EntropyWarnings the
+// entropy analyzer produced for the same file. nextID is the running
+// counter the caller threads through so finding_001 / finding_002 /
+// ... are stable across the whole ScanResult.
+//
+// Entropy analysis runs after the pattern matcher on each line. If
+// the line already produced a pattern Finding we skip the entropy
+// pass for that line so callers do not get one Finding and one
+// EntropyWarning for the same secret. Allowlisted lines suppress
+// both channels.
 //
 // Errors reading the file are swallowed: an unreadable file is
 // reported as zero findings rather than aborting the run. The CLI
 // surfaces the broader scan summary; a single skipped file is not
 // worth failing the whole gate over.
-func (b *BuiltIn) scanFile(abs, rel string, nextID int) []Finding {
+func (b *BuiltIn) scanFile(abs, rel string, nextID int) ([]Finding, []EntropyWarning) {
 	f, err := os.Open(abs)
 	if err != nil {
-		return nil
+		return nil, nil
 	}
 	defer f.Close()
 
 	info, err := f.Stat()
 	if err != nil || !info.Mode().IsRegular() {
-		return nil
+		return nil, nil
 	}
 	if info.Size() > maxScannedFileBytes {
-		return nil
+		return nil, nil
 	}
 
 	// Peek the first 512 bytes to skip binary files. A NUL byte in
@@ -286,13 +311,14 @@ func (b *BuiltIn) scanFile(abs, rel string, nextID int) []Finding {
 	head := make([]byte, 512)
 	n, _ := f.Read(head)
 	if isBinary(head[:n]) {
-		return nil
+		return nil, nil
 	}
 	if _, err := f.Seek(0, 0); err != nil {
-		return nil
+		return nil, nil
 	}
 
 	var findings []Finding
+	var warnings []EntropyWarning
 	scanner := bufio.NewScanner(f)
 	// Allow long lines (minified JS, generated configs) without
 	// truncation; the default 64 KiB token cap silently drops the
@@ -308,6 +334,7 @@ func (b *BuiltIn) scanFile(abs, rel string, nextID int) []Finding {
 			continue
 		}
 
+		patternHit := false
 		for _, rule := range b.patterns {
 			if rule.re.MatchString(line) {
 				findings = append(findings, Finding{
@@ -321,6 +348,7 @@ func (b *BuiltIn) scanFile(abs, rel string, nextID int) []Finding {
 					BlocksExport: true,
 				})
 				nextID++
+				patternHit = true
 			}
 		}
 		for _, rule := range b.customPatterns {
@@ -336,11 +364,17 @@ func (b *BuiltIn) scanFile(abs, rel string, nextID int) []Finding {
 					BlocksExport: true,
 				})
 				nextID++
+				patternHit = true
 			}
 		}
+
+		if patternHit || b.entropy == nil {
+			continue
+		}
+		warnings = append(warnings, b.entropy.analyzeLine(rel, lineNo, line)...)
 	}
 
-	return findings
+	return findings, warnings
 }
 
 // lineAllowlisted reports whether line is excused from matching. A
