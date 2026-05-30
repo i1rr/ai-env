@@ -2,11 +2,11 @@
 
 `ai-env` is a Go CLI that scaffolds isolated sandbox environments for AI coding agents. It keeps each agent's work in its own workspace and configuration tree under `.ai-env/`, separate from your active working copy.
 
-This repository contains plans 01, 02, and 03: project scaffolding, configuration loading and validation, workspace isolation via Git worktrees or directory copies, diff and patch export, protected path matching, and the run-lifecycle supervisor (run IDs, run directory layout, lifecycle state machine, disk-streamed stdout/stderr capture, max-runtime and signal handling, partial-diff collection, and the `--continue` link). Sandbox backends, network policy, and scanning are tracked in later plans.
+This repository contains plans 01 through 04: project scaffolding, configuration loading and validation, workspace isolation via Git worktrees or directory copies, diff and patch export, protected path matching, the run-lifecycle supervisor (run IDs, run directory layout, lifecycle state machine, disk-streamed stdout/stderr capture, max-runtime and signal handling, partial-diff collection, and the `--continue` link), the Backend interface with a Docker Sandboxes (`sbx`) adapter and an in-memory mock, agent launchers for Claude Code and Codex with version, flag, and credential probing, and the `ai-env agents` family of subcommands. Network policy enforcement and scanning are tracked in later plans.
 
 ## Status
 
-Plans 01, 02, and 03 complete. The CLI builds and runs on macOS and Linux, has unit and integration tests for config, scaffold, stack detection, gitignore handling, workspace materialization (Git and non-Git fixtures), diff and patch generation, protected path patterns, run-ID uniqueness within the same second, max-runtime timeout, and SIGINT log/diff preservation. CI runs `gofmt`, `go vet`, `go test -race`, `staticcheck`, and `govulncheck` via GitHub Actions.
+Plans 01, 02, 03, and 04 complete. The CLI builds and runs on macOS and Linux, has unit and integration tests for config, scaffold, stack detection, gitignore handling, workspace materialization (Git and non-Git fixtures), diff and patch generation, protected path patterns, run-ID uniqueness within the same second, max-runtime timeout, SIGINT log/diff preservation, `sbx` version compatibility, agent flag selection, and credential-mode resolution. CI runs `gofmt`, `go vet`, `go test -race`, `staticcheck`, and `govulncheck` via GitHub Actions. Real-backend and real-agent integration tests are gated behind `AI_ENV_BACKEND_INTEGRATION=1` and skip cleanly when their host prerequisites are absent.
 
 ## Installation
 
@@ -106,6 +106,18 @@ Prints captured stdout and/or stderr for an env's latest run. Flags:
 
 An env with no recorded runs yet exits 0 with a friendly "no runs recorded" message. The log files are opaque text (whatever the agent wrote); `ai-env logs` does not parse them.
 
+### `ai-env agents list`
+
+Loads the project's `.ai-env/agents.yaml`, unions its keys with the launchers registered in code, and prints a four-column table: `NAME`, `BINARY`, `VERSION`, `STATUS`. Every probe runs with a short host-side timeout (10 seconds) so a wedged agent CLI cannot stall the table. Status values are descriptive strings (`ok`, `binary not found`, `version unsupported (<constraint>)`, `probe failed`, `no launcher registered`, `no contract in agents.yaml`, `unknown agent`) rather than booleans, so the operator can spot the precise mismatch at a glance. `list` never trial-runs autonomous flags; it only invokes the version subcommand.
+
+### `ai-env agents doctor`
+
+Runs the four-check health report for every registered agent: binary on `PATH`, parsed version satisfies the contract's `version_constraint`, the requested autonomous flag candidate appears in `--help`, and a credential mode is plausibly available. Each check renders as a `PASS  <check>: <reason>` or `FAIL  <check>: <reason>` line so the output is grep-friendly. `doctor` exits non-zero when any check fails, so it is safe to wire into CI. The credential check is host-side and best-effort: `backend_managed` is reported as "verified at run time" (it requires an active backend), `provider_proxy` is reported as a Plan 05 stub, and `raw_env_explicit` reports whether the conventional raw-token env var (`ANTHROPIC_API_KEY` for Claude, `OPENAI_API_KEY` for Codex) is present. The supervisor enforces the real fail-closed check at run time.
+
+### `ai-env agents probe <agent>`
+
+Runs the full `Probe` pipeline for a single agent and prints a detailed report: contract command, version constraint, resolved binary path, detected version (with a supported-yes/no flag), the autonomous-flag candidates from the contract plus the one that was selected, the credential mode preference order, and the first 20 lines of the captured `--help` text. `probe` never trial-runs the agent's autonomous flags against the workspace; it only invokes the version subcommand and `--help`. Exits non-zero when the probe produced an error.
+
 ## Run lifecycle
 
 When the supervisor (`internal/run`) drives a run, it materializes everything under `.ai-env/runs/<run-id>/`. Run IDs follow the format `YYYYMMDD-HHMMSS-<6-hex>`. The six-hex suffix guarantees same-second uniqueness on a single host (~16M distinct suffixes per second).
@@ -183,7 +195,42 @@ On every terminal the supervisor's finalizer runs an orderly shutdown:
 
 The previous run's workspace is left exactly as the agent left it: no checkout, no reset, no clean. The supervisor's main loop opens the workspace via `workspace.ReadMetadata` at wire time, and that metadata was written once by `ai-env new`, so the agent on the new run sees the workspace in the same state as the previous run left it. The continuation relationship lives only in `run.json`'s `linked_previous_run` field; no special lifecycle event is emitted.
 
-Note: the supervisor primitives, status, logs, list-with-run-state, and `--continue` plumbing all landed in this phase. The user-facing `ai-env run` subcommand that wires them together (plus the real backend exec) is tracked in plan 04; today the supervisor is exercised through the package API and via tests.
+Note: the supervisor primitives, status, logs, list-with-run-state, and `--continue` plumbing all landed in plan 03. The Backend interface, agent launchers, and `ai-env agents` subcommands documented below landed in plan 04 alongside the supervisor's optional `BackendAdapter` seam. The user-facing `ai-env run` subcommand that wires them together end-to-end is tracked in plan 05.
+
+## Backend abstraction
+
+The `Backend` interface in `internal/backend/backend.go` is the contract every sandbox implementation satisfies. It exposes nine methods (`Detect`, `Create`, `Start`, `Exec`, `Stop`, `CopyIn`, `CopyOut`, `ApplyNetworkPolicy`, `Stats`, `Destroy`) the supervisor drives through a run's lifecycle. Backends are addressed by an opaque `envID` returned from `Create`; `Detect` reports `BackendStatus` (name, availability, version, whether the version is in the tested range, and a short diagnostic message) without ever returning an error.
+
+Two implementations ship today:
+
+- `internal/backend/mock` is an in-memory no-op backend used by unit tests. It records every method call against an internal log so tests can assert that the supervisor invoked the backend in the expected order without spawning processes.
+- `internal/backend/docker_sbx` wraps the Docker Sandboxes `sbx` CLI. `Detect` shells out to `sbx version`, parses a semver-ish token, and compares it against the inclusive range in `internal/backend/docker_sbx/compat.go` (`MinTestedVersion`..`MaxTestedVersion`, currently `0.1.0 - 0.9.99`). Versions outside that range surface as `VersionSupported=false`, and the operator must opt in with `--allow-untested-backend-version` to proceed. The adapter parses minimally: it relies on exit codes, the version probe, and known workspace paths rather than scraping interactive `sbx` stdout for state transitions, so if upstream output formatting changes but exit codes and paths still work, `ai-env` keeps working.
+
+The supervisor in `internal/run/supervisor.go` exposes an optional `BackendAdapter` field on its options. When non-nil, the supervisor routes the child process through `Backend.Exec` against the supplied `BackendEnvID` instead of spawning host-side via `exec.Command`. The fallback path (no `BackendAdapter`) keeps the legacy host-exec wiring so the pre-plan-04 lifecycle, signal, and timeout tests continue to drive real subprocesses without constructing a backend. Production code paths (the forthcoming `ai-env run` CLI) always supply a backend.
+
+## Agent launchers
+
+Agent launchers live under `internal/agents/`. The shared `Launcher` interface (`internal/agents/agents.go`) has two methods, `Probe` and `Plan`:
+
+- `Probe` resolves the binary on `PATH`, runs the contract's version subcommand, validates the parsed version against the contract's `version_constraint`, captures `<binary> --help`, and picks the first autonomous flag candidate every flag of which appears literally in the help text. The result is a `ProbeResult` carrying `BinaryPath`, `Version`, `VersionSupported`, `SelectedFlags`, and `HelpOutput` (plus an `Error` when any step failed).
+- `Plan` turns a high-level `Request` (mode, task body, workspace dir, credential preferences, extra env, extra args) plus a successful `ProbeResult` into a `backend.Command` the supervisor hands to `Backend.Exec`. The task body is piped on the agent's stdin via `LaunchPlan.StdinBody` so the supervisor never has to drop a prompt file into the workspace.
+
+Two launchers ship today, both following the same five-step structure (resolve binary, probe version, select autonomous flags, detect credential mode, build launch command):
+
+- `internal/agents/claude` wraps the `claude` binary. Autonomous mode passes `--dangerously-skip-permissions` (verified against `claude --help`). Provider proxy and raw-env injection use `ANTHROPIC_BASE_URL` and `ANTHROPIC_API_KEY` respectively.
+- `internal/agents/codex` wraps the `codex` binary. Autonomous mode passes `--dangerously-bypass-approvals-and-sandbox`. Provider proxy and raw-env injection use `OPENAI_BASE_URL` and `OPENAI_API_KEY`.
+
+Launchers are stateless: every method takes the inputs it needs explicitly, and a `ProbeDeps` struct lets tests inject fakes for `exec.LookPath` and the runner that backs the version and `--help` probes. The flag-selection check is a substring test against the captured help, not a full help parser; per the plan's "parse minimally" rule, that trade-off is acceptable because we only ever check candidates that the contract author put in `agents.yaml`.
+
+## Credential modes
+
+The three canonical model-credential modes are defined as constants on `internal/agents/agents.go` and matched verbatim against the strings in `agents.yaml` and `run.json`:
+
+- `backend_managed` is the safe default: the backend injects the provider credential per call, the raw token never enters the agent process environment. Selected when the supervisor's `EnvironmentProbe.BackendManaged` is true.
+- `provider_proxy` points the agent at a host-side provider-compatible proxy. The raw token stays on the host; the sandbox only sees the proxy URL. Selected when the agent supports a custom base URL (Claude and Codex both do) and a proxy URL is configured. The proxy URL plumbing itself is a Plan 05 stub; the resolver does the correct check today.
+- `raw_env_explicit` injects the raw provider token into the agent's process environment. Selection requires the operator to pass `--allow-raw-model-token-in-sandbox` at run time and to have populated `EnvironmentProbe.RawTokenEnv`. The supervisor records the mode in `run.json` and prints a `reduced safety: yes` warning banner; `ai-env status` surfaces the same line for past runs.
+
+`ResolveCredentialMode` and the lower-level `ResolveCredentialModeDetailed` walk the contract's `Default + FallbackOrder` list in order and return the first mode the host can satisfy. Resolution is fail-closed: when no mode is available, the returned `*CredentialResolutionError` wraps `ErrCredentialModeUnavailable` and carries a per-mode trace explaining why each candidate was rejected (so `ai-env agents doctor` and the supervisor's diagnostics can print every mechanism that was tried). An unknown mode name in `agents.yaml` returns `ErrUnknownCredentialMode` rather than silently skipping the check.
 
 ## Generated configuration files
 
@@ -263,16 +310,25 @@ To customize, set `filesystem.protected_paths` in `policy.yaml`. An explicitly e
 
 ```
 ai-env/
-  cmd/ai-env/         # CLI entry point (Cobra wiring)
-  internal/cli/       # Command implementations (RunNew, RunList, RunDiff, RunPatch, RunStatus, RunLogs)
-  internal/config/    # Config structs, YAML loader, validators
-  internal/workspace/ # Workspace strategies (worktree, copy), diff, patch, protected matcher
-  internal/run/       # Run IDs, run directory layout, state machine, lifecycle.jsonl, run.json,
-                      # stream capture, supervisor main loop, signal handling, finalizer,
-                      # partial-diff collection, --continue helper
-  .github/workflows/  # CI pipeline
-  plan.md             # Current plan in progress
-  plans/              # Historical planning artifacts
+  cmd/ai-env/                 # CLI entry point (Cobra wiring)
+  internal/cli/               # Command implementations (RunNew, RunList, RunDiff, RunPatch,
+                              # RunStatus, RunLogs, RunAgentsList/Doctor/Probe)
+  internal/config/            # Config structs, YAML loader, validators
+  internal/workspace/         # Workspace strategies (worktree, copy), diff, patch, protected matcher
+  internal/run/               # Run IDs, run directory layout, state machine, lifecycle.jsonl,
+                              # run.json, stream capture, supervisor main loop (with optional
+                              # BackendAdapter seam), signal handling, finalizer, partial-diff
+                              # collection, --continue helper
+  internal/backend/           # Backend interface and supporting types
+  internal/backend/mock/      # In-memory mock backend used by unit tests
+  internal/backend/docker_sbx/ # Docker Sandboxes adapter (sbx CLI wrapper, compat.go)
+  internal/agents/            # Launcher interface, version/help probes, credential resolver
+  internal/agents/claude/     # Claude Code launcher
+  internal/agents/codex/      # Codex launcher
+  .github/workflows/          # CI pipeline
+  plan.md                     # Current plan in progress
+  plans/                      # Historical planning artifacts
+  archive/                    # Archived plans (informational)
 ```
 
 ## Development
@@ -291,6 +347,28 @@ go install golang.org/x/vuln/cmd/govulncheck@latest
 staticcheck ./...
 govulncheck ./...
 ```
+
+### Integration tests
+
+The default `go test ./...` run is hermetic: it never requires `sbx`, `claude`, or `codex` to be installed on the host. The integration tests that exercise those real binaries are gated behind the `AI_ENV_BACKEND_INTEGRATION` environment variable. They live alongside the unit tests under their respective packages (`internal/backend/docker_sbx/integration_test.go`, `internal/agents/claude/integration_test.go`, `internal/agents/codex/integration_test.go`) and use a two-stage skip: first the env-var check, then an `exec.LookPath` for the binary so a missing prerequisite produces a clear "binary not on PATH" skip rather than a failure.
+
+To run them:
+
+```sh
+AI_ENV_BACKEND_INTEGRATION=1 go test ./internal/backend/docker_sbx/...
+AI_ENV_BACKEND_INTEGRATION=1 go test ./internal/agents/...
+```
+
+Prerequisites the gate assumes when on:
+
+- `internal/backend/docker_sbx`: a working `sbx` CLI on `PATH`, plus whatever daemon (Docker, sandbox runtime) it needs to bring environments up. The lifecycle test exercises `Detect`, `Create`, `Start`, `Exec`, `Stop`, and `Destroy` against a real environment.
+- `internal/agents/claude` and `internal/agents/codex`: the corresponding agent CLI on `PATH`. The probes invoke only the version subcommand and `--help`; they never trial-run autonomous flags.
+
+### Environment variables
+
+| Variable | Default | Purpose |
+| -------- | ------- | ------- |
+| `AI_ENV_BACKEND_INTEGRATION` | unset | When set to `1`, enables the gated backend and agent integration tests. Unset is the default and keeps `go test ./...` hermetic. |
 
 ## License
 
