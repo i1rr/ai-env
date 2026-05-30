@@ -281,6 +281,45 @@ type SupervisorOptions struct {
 	// indefinitely.
 	DiffTimeout time.Duration
 
+	// ScanHook, when non-nil, is invoked during StateScanning on the
+	// supervisor's happy-path terminal walk so the post-run secret /
+	// dependency scanner runs automatically after the agent stops and
+	// before the run transitions to StateReporting. Plan 06 step 9
+	// ("wire scanner into run lifecycle: run scan automatically after
+	// agent stops, before report") is the rule the supervisor enforces
+	// here.
+	//
+	// The hook is responsible for materializing secret-scan.json and
+	// dependency-report.json inside runDir; the supervisor never
+	// inspects findings itself. A non-nil error returned from the hook
+	// is treated as a scanner-infrastructure failure and lands the run
+	// in StateFailedScan / StopReasonScanFailure. Findings themselves
+	// are NOT failures: the export gate (consulted later by `ai-env
+	// patch` / `ai-env pr`) is the surface that refuses the diff, so a
+	// run with blocking findings still ends in StateCompleted on disk
+	// and remains inspectable.
+	//
+	// The hook is never invoked on non-happy terminals (timeout, idle,
+	// cancel, failed_*) because the run never reached the post-agent
+	// drain there is nothing to scan.
+	//
+	// Leaving the hook nil skips the scan-time call entirely and keeps
+	// the legacy plan-03 behavior where the StateScanning transition is
+	// a lifecycle stamp only. Production CLI call sites populate this
+	// once plan 06 wiring lands; tests that do not need scanning leave
+	// it nil.
+	ScanHook ScanHook
+
+	// ScanTimeout caps how long ScanHook is allowed to run. Zero falls
+	// back to defaultScanTimeout (5m). The cap exists because a wedged
+	// external scanner (e.g. a trivy filesystem scan against a corrupt
+	// index, or a govulncheck against a flaky module proxy) would
+	// otherwise block the supervisor's StateScanning walk past the
+	// operator's tolerance. The plan's "scan automatically" rule still
+	// honors the bound: a timeout escalates to a StateFailedScan
+	// terminal so the operator sees the failure rather than a hung run.
+	ScanTimeout time.Duration
+
 	// UserOutput is the io.Writer the supervisor uses for user-visible
 	// terminal output. Today it is used by step 10 to print the
 	// `ai-env run <env-name> --continue` suggestion when the run lands
@@ -518,6 +557,9 @@ func NewSupervisor(opts SupervisorOptions) (*Supervisor, error) {
 	}
 	if opts.DiffTimeout < 0 {
 		return nil, fmt.Errorf("run: NewSupervisor: DiffTimeout must be non-negative, got %v", opts.DiffTimeout)
+	}
+	if opts.ScanTimeout < 0 {
+		return nil, fmt.Errorf("run: NewSupervisor: ScanTimeout must be non-negative, got %v", opts.ScanTimeout)
 	}
 
 	now := opts.Now
@@ -1312,9 +1354,12 @@ func (s *Supervisor) driveTerminalSequence(cause terminalCause, exit exitInfo) t
 	switch cause.state {
 	case StateCompleted:
 		// Happy path: walk stopping -> scanning -> reporting -> completed.
-		// Each stage's body (scanning, reporting) is a no-op today; the
-		// supervisor still transitions through them so the lifecycle.jsonl
-		// is the full record the plan documents.
+		// The supervisor transitions through each stage so the
+		// lifecycle.jsonl is the full record the plan documents. The
+		// StateScanning stage is no longer a pure stamp: plan 06 step 9
+		// wires the post-run scanner here so secret-scan.json and
+		// dependency-report.json land on disk before StateReporting. A
+		// scan-infrastructure failure diverts the walk to StateFailedScan.
 		for _, next := range []State{StateStopping, StateScanning, StateReporting, StateCompleted} {
 			if err := s.machine.Transition(next); err != nil {
 				// If we cannot transition (e.g. the machine is already
@@ -1335,6 +1380,29 @@ func (s *Supervisor) driveTerminalSequence(cause terminalCause, exit exitInfo) t
 				return cause
 			}
 			_ = s.writeRecordSnapshot(next, &exit.code, nil, nil)
+
+			// Plan 06 step 9: run the scanner during StateScanning so
+			// secret-scan.json / dependency-report.json are durable
+			// before the run advances to StateReporting. Errors from
+			// the hook are scanner-infrastructure failures: the
+			// supervisor diverts the walk to StateFailedScan and
+			// returns immediately. Findings themselves are advisory at
+			// run time; the export gate refuses them later when the
+			// user runs `ai-env patch` / `ai-env pr`.
+			if next == StateScanning {
+				if err := runScanHook(s.opts.RunDir, s.opts.ScanHook, s.opts.ScanTimeout); err != nil {
+					if s.opts.UserOutput != nil {
+						_, _ = fmt.Fprintf(s.opts.UserOutput, "ai-env: warning: scan hook failed: %v\n", err)
+					}
+					if terr := s.machine.Transition(StateFailedScan); terr != nil {
+						return terminalCause{state: s.machine.Current(), reason: StopReasonForState(s.machine.Current()), note: fmt.Sprintf("scan hook failed: %v", err)}
+					}
+					_ = s.lcWri.Write(StateFailedScan)
+					reason := StopReasonScanFailure
+					_ = s.writeRecordSnapshot(StateFailedScan, &exit.code, &reason, nil)
+					return terminalCause{state: StateFailedScan, reason: reason, note: fmt.Sprintf("scan hook failed: %v", err)}
+				}
+			}
 		}
 		reason := StopReasonAgentExit
 		// Final run.json snapshot includes stop_reason and exit_code.
