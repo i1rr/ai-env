@@ -115,14 +115,23 @@ func (l *Launcher) Plan(req agents.Request, probe agents.ProbeResult, env agents
 		return agents.LaunchPlan{}, fmt.Errorf("agents/claude: %w", agents.ErrFlagsUnsupported)
 	}
 
-	credentialMode, credEnv, err := agents.ResolveCredentialMode(
-		config.AgentCredentialMode{
-			Default:       "backend_managed",
-			FallbackOrder: []string{"provider_proxy", "raw_env_explicit"},
-		},
-		env, req.AllowRawModelToken)
+	// Claude reads ANTHROPIC_BASE_URL when present, so for the
+	// provider_proxy probe in ResolveCredentialMode we report the
+	// custom-base-URL capability as satisfied. The proxy URL itself is
+	// supplied by the supervisor through EnvironmentProbe in Plan 05.
+	probeEnv := env
+	probeEnv.AgentSupportsCustomBaseURL = true
+
+	contract := req.CredentialMode
+	if contract.Default == "" {
+		contract = config.AgentCredentialMode{
+			Default:       agents.CredentialModeBackendManaged,
+			FallbackOrder: []string{agents.CredentialModeProviderProxy, agents.CredentialModeRawEnvExplicit},
+		}
+	}
+	resolved, err := agents.ResolveCredentialModeDetailed(contract, probeEnv, req.AllowRawModelToken)
 	if err != nil {
-		return agents.LaunchPlan{}, err
+		return agents.LaunchPlan{}, fmt.Errorf("agents/claude: %w", err)
 	}
 
 	args := append([]string{}, probe.SelectedFlags...)
@@ -136,12 +145,12 @@ func (l *Launcher) Plan(req agents.Request, probe agents.ProbeResult, env agents
 		Program: Name,
 		Args:    args,
 		Dir:     req.WorkspaceDir,
-		Env:     agents.MergeEnv(credEnv, req.ExtraEnv),
+		Env:     agents.MergeEnv(resolved.InjectedEnv, req.ExtraEnv),
 	}
 
 	return agents.LaunchPlan{
 		Command:        cmd,
-		CredentialMode: credentialMode,
+		CredentialMode: resolved.Mode,
 		StdinBody:      req.TaskBody,
 	}, nil
 }

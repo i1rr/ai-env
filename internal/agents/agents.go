@@ -94,6 +94,16 @@ type Request struct {
 	// even if the credential_mode contract lists it.
 	AllowRawModelToken bool
 
+	// CredentialMode is the contract's credential_mode block from
+	// agents.yaml: the launcher hands it to ResolveCredentialMode so
+	// the contract drives the preference order rather than a
+	// hardcoded list. The supervisor populates this from the loaded
+	// AgentsConfig before calling Plan. A zero value falls back to the
+	// launcher's documented default (backend_managed first, then
+	// provider_proxy, then raw_env_explicit), which keeps single-call
+	// test usage simple but is not what production code should rely on.
+	CredentialMode config.AgentCredentialMode
+
 	// ExtraEnv is additional KEY=VALUE entries the supervisor wants
 	// injected on top of whatever credential mode resolution produces.
 	// May be nil.
@@ -194,8 +204,21 @@ type EnvironmentProbe struct {
 	// vault). When true, Plan does not need to inject any env var.
 	BackendManaged bool
 
+	// AgentSupportsCustomBaseURL reports whether the agent CLI can be
+	// pointed at a custom provider endpoint (typically via a
+	// PROVIDER_BASE_URL environment variable). The launcher sets this
+	// based on what it knows about its own binary (Claude reads
+	// ANTHROPIC_BASE_URL, Codex reads OPENAI_BASE_URL). It is a
+	// prerequisite for provider_proxy: per the plan, provider_proxy
+	// resolution must verify the agent supports a custom base URL.
+	// The proxy URL plumbing itself lands in Plan 05; this flag is the
+	// stub the resolver checks today.
+	AgentSupportsCustomBaseURL bool
+
 	// ProviderProxyURL is the base URL of the provider proxy when one
-	// is configured. Empty means provider_proxy is unavailable.
+	// is configured. Empty means provider_proxy is unavailable. Plan
+	// 05 wires this from secrets.local.yaml; today the launcher leaves
+	// it empty unless the operator threads it through ExtraEnv.
 	ProviderProxyURL string
 
 	// RawTokenEnv is the explicit KEY=VALUE list the operator
@@ -208,8 +231,86 @@ type EnvironmentProbe struct {
 // ErrCredentialModeUnavailable is returned by Plan when none of the
 // contract's credential modes can be satisfied by the host. The
 // supervisor surfaces this with the contract's fallback_order so the
-// operator can see which mechanisms were tried.
+// operator can see which mechanisms were tried. The error wraps a
+// *CredentialResolutionError when more detail is available.
 var ErrCredentialModeUnavailable = fmt.Errorf("agents: no supported credential mode available")
+
+// ErrUnknownCredentialMode is returned by the resolver when the
+// contract names a credential mode the launcher does not understand.
+// Failing closed on an unknown mode prevents a typo in agents.yaml
+// from silently disabling the credential check.
+var ErrUnknownCredentialMode = fmt.Errorf("agents: unknown credential mode in contract")
+
+// Canonical credential mode identifiers. These mirror the strings the
+// plan uses verbatim in agents.yaml, run.json, and operator-visible
+// surfaces. Callers should compare against these constants rather than
+// retyping the literals so a future rename is one edit.
+const (
+	// CredentialModeBackendManaged is the safe default: the backend
+	// injects the provider credential per-call, the raw token never
+	// enters the agent process environment.
+	CredentialModeBackendManaged = "backend_managed"
+
+	// CredentialModeProviderProxy points the agent at a host-side
+	// provider-compatible proxy. The raw token stays on the host; the
+	// sandbox only sees the proxy URL.
+	CredentialModeProviderProxy = "provider_proxy"
+
+	// CredentialModeRawEnvExplicit injects the raw provider token into
+	// the agent's process environment. The operator must opt in with
+	// --allow-raw-model-token-in-sandbox; the supervisor records the
+	// mode in run.json and prints a warning.
+	CredentialModeRawEnvExplicit = "raw_env_explicit"
+)
+
+// CredentialModeAttempt records the resolver's verdict on one mode
+// from the contract's preference list. The resolver returns a slice of
+// attempts so the supervisor can surface a complete fail-closed
+// diagnostic ("we tried X, Y, Z; here is why each failed").
+type CredentialModeAttempt struct {
+	// Mode is the mode name from the contract (e.g. "backend_managed").
+	Mode string
+
+	// OK is true when this mode was selected. Exactly one entry in a
+	// successful resolution has OK=true; in a failed resolution every
+	// entry has OK=false.
+	OK bool
+
+	// Reason is a short human-readable explanation. For OK=true it is
+	// "selected"; for OK=false it describes why the mode was rejected
+	// (e.g. "backend does not support managed credentials",
+	// "agent does not support a custom base URL",
+	// "raw token not allowed: pass --allow-raw-model-token-in-sandbox").
+	Reason string
+}
+
+// CredentialResolutionError is the structured error the resolver
+// returns wrapped in ErrCredentialModeUnavailable. It carries the full
+// list of attempted modes so the supervisor and doctor surfaces can
+// print every mechanism that was considered and why it was rejected.
+type CredentialResolutionError struct {
+	// Considered is the resolver's per-mode verdict in the order the
+	// contract listed them (Default first, then FallbackOrder).
+	Considered []CredentialModeAttempt
+}
+
+// Error implements the error interface. The message is intentionally
+// terse; callers that want the full breakdown read Considered directly.
+func (e *CredentialResolutionError) Error() string {
+	if e == nil || len(e.Considered) == 0 {
+		return ErrCredentialModeUnavailable.Error()
+	}
+	parts := make([]string, 0, len(e.Considered))
+	for _, a := range e.Considered {
+		parts = append(parts, fmt.Sprintf("%s: %s", a.Mode, a.Reason))
+	}
+	return fmt.Sprintf("%s (tried %s)",
+		ErrCredentialModeUnavailable.Error(), strings.Join(parts, "; "))
+}
+
+// Unwrap lets errors.Is reach ErrCredentialModeUnavailable through the
+// structured error.
+func (e *CredentialResolutionError) Unwrap() error { return ErrCredentialModeUnavailable }
 
 // ErrFlagsUnsupported is returned by Plan when the requested mode
 // has no verified args_candidate. The supervisor surfaces this with
@@ -518,41 +619,184 @@ func ProbeHelp(ctx context.Context, deps ProbeDeps, binary string) (string, erro
 // ResolveCredentialMode walks the contract's Default + FallbackOrder
 // list against the supplied EnvironmentProbe and returns the first
 // mode the host can satisfy, along with the env vars to inject (when
-// applicable). raw_env_explicit is only honored when allowRawToken
-// is true; otherwise it is skipped and the next mode is tried.
+// applicable). raw_env_explicit is only honored when allowRawToken is
+// true; otherwise it is skipped and the next mode is tried.
 //
-// When no mode is available, ErrCredentialModeUnavailable is
-// returned so the supervisor can surface a fail-closed message that
-// lists the modes that were considered.
+// When no mode is available, the returned error wraps
+// ErrCredentialModeUnavailable inside a *CredentialResolutionError
+// that records why each mode was rejected. The supervisor surfaces
+// the breakdown so the operator can see the full fail-closed audit.
+//
+// This is the back-compat wrapper around ResolveCredentialModeDetailed
+// for callers that only need the chosen mode + env. New callers that
+// want the per-mode attempts (doctor, supervisor diagnostics) should
+// use ResolveCredentialModeDetailed directly.
 func ResolveCredentialMode(contract config.AgentCredentialMode, env EnvironmentProbe, allowRawToken bool) (mode string, injectedEnv []string, err error) {
-	order := append([]string{contract.Default}, contract.FallbackOrder...)
+	res, err := ResolveCredentialModeDetailed(contract, env, allowRawToken)
+	if err != nil {
+		return "", nil, err
+	}
+	return res.Mode, res.InjectedEnv, nil
+}
+
+// CredentialResolution is the result of ResolveCredentialModeDetailed.
+// It carries the chosen mode, the env vars to inject, and the full
+// per-mode trace so callers can surface diagnostics.
+type CredentialResolution struct {
+	// Mode is the mode the resolver settled on (one of the
+	// CredentialMode* constants).
+	Mode string
+
+	// InjectedEnv is the slice of KEY=VALUE entries the launcher must
+	// place in backend.Command.Env on top of any caller-supplied
+	// ExtraEnv. May be nil when the chosen mode injects nothing (e.g.
+	// backend_managed).
+	InjectedEnv []string
+
+	// Considered is the per-mode trace, in the order the contract
+	// listed them. Exactly one entry has OK=true. The supervisor
+	// records this in lifecycle.jsonl so the operator can see what
+	// fallback chain was walked.
+	Considered []CredentialModeAttempt
+
+	// RequiresWarning is true when the selected mode is
+	// raw_env_explicit. The supervisor uses it to decide whether to
+	// print a "reduced safety: raw provider token in sandbox" warning
+	// banner.
+	RequiresWarning bool
+}
+
+// ResolveCredentialModeDetailed walks the contract's preference list
+// and returns a structured CredentialResolution. Failures wrap
+// ErrCredentialModeUnavailable inside a *CredentialResolutionError so
+// errors.Is(err, ErrCredentialModeUnavailable) keeps working.
+//
+// The check semantics, per plan step 7:
+//
+//   - backend_managed selects when env.BackendManaged is true. This is
+//     the "verify backend supports it" check.
+//   - provider_proxy selects only when both the agent supports a
+//     custom base URL (env.AgentSupportsCustomBaseURL) and a proxy
+//     URL is configured (env.ProviderProxyURL). The plan calls the
+//     proxy URL plumbing a Plan 05 stub: today the resolver does the
+//     correct check, callers just rarely supply a URL.
+//   - raw_env_explicit selects only when allowRawToken is true AND
+//     env.RawTokenEnv is non-empty. allowRawToken mirrors the
+//     --allow-raw-model-token-in-sandbox flag. Selection sets
+//     RequiresWarning so the supervisor knows to print the banner.
+//   - An unknown mode name returns ErrUnknownCredentialMode (fail
+//     closed; a typo in agents.yaml must not silently disable the
+//     credential check).
+func ResolveCredentialModeDetailed(contract config.AgentCredentialMode, env EnvironmentProbe, allowRawToken bool) (CredentialResolution, error) {
+	order := credentialModeOrder(contract)
+	considered := make([]CredentialModeAttempt, 0, len(order))
+
 	for _, m := range order {
 		switch m {
-		case "backend_managed":
+		case CredentialModeBackendManaged:
 			if env.BackendManaged {
-				return m, nil, nil
+				considered = append(considered, CredentialModeAttempt{
+					Mode: m, OK: true, Reason: "selected: backend brokers provider credential",
+				})
+				return CredentialResolution{
+					Mode:        m,
+					InjectedEnv: nil,
+					Considered:  considered,
+				}, nil
 			}
-		case "provider_proxy":
-			if env.ProviderProxyURL != "" {
-				return m, []string{"ANTHROPIC_BASE_URL=" + env.ProviderProxyURL, "OPENAI_BASE_URL=" + env.ProviderProxyURL}, nil
+			considered = append(considered, CredentialModeAttempt{
+				Mode: m, Reason: "backend does not advertise managed credentials",
+			})
+
+		case CredentialModeProviderProxy:
+			if !env.AgentSupportsCustomBaseURL {
+				considered = append(considered, CredentialModeAttempt{
+					Mode: m, Reason: "agent does not support a custom provider base URL (Plan 05)",
+				})
+				continue
 			}
-		case "raw_env_explicit":
+			if env.ProviderProxyURL == "" {
+				considered = append(considered, CredentialModeAttempt{
+					Mode: m, Reason: "no provider proxy URL configured (Plan 05)",
+				})
+				continue
+			}
+			injected := providerProxyEnv(env.ProviderProxyURL)
+			considered = append(considered, CredentialModeAttempt{
+				Mode: m, OK: true, Reason: "selected: agent points at provider proxy",
+			})
+			return CredentialResolution{
+				Mode:        m,
+				InjectedEnv: injected,
+				Considered:  considered,
+			}, nil
+
+		case CredentialModeRawEnvExplicit:
 			if !allowRawToken {
+				considered = append(considered, CredentialModeAttempt{
+					Mode: m, Reason: "raw token not allowed: pass --allow-raw-model-token-in-sandbox",
+				})
 				continue
 			}
 			if len(env.RawTokenEnv) == 0 {
+				considered = append(considered, CredentialModeAttempt{
+					Mode: m, Reason: "no raw provider token available in host environment",
+				})
 				continue
 			}
 			out := make([]string, len(env.RawTokenEnv))
 			copy(out, env.RawTokenEnv)
-			return m, out, nil
+			considered = append(considered, CredentialModeAttempt{
+				Mode: m, OK: true, Reason: "selected: raw provider token injected into sandbox",
+			})
+			return CredentialResolution{
+				Mode:            m,
+				InjectedEnv:     out,
+				Considered:      considered,
+				RequiresWarning: true,
+			}, nil
+
 		case "":
 			continue
+
 		default:
-			return "", nil, fmt.Errorf("agents: unknown credential mode %q in contract", m)
+			return CredentialResolution{}, fmt.Errorf("%w: %q", ErrUnknownCredentialMode, m)
 		}
 	}
-	return "", nil, ErrCredentialModeUnavailable
+
+	return CredentialResolution{}, &CredentialResolutionError{Considered: considered}
+}
+
+// credentialModeOrder returns the contract's preference list as a flat
+// slice (Default first, then FallbackOrder). Empty entries are dropped
+// later in the switch; we keep them here so the slice index stays
+// aligned with the contract's original order for diagnostics.
+func credentialModeOrder(contract config.AgentCredentialMode) []string {
+	out := make([]string, 0, 1+len(contract.FallbackOrder))
+	out = append(out, contract.Default)
+	out = append(out, contract.FallbackOrder...)
+	return out
+}
+
+// providerProxyEnv returns the KEY=VALUE pairs the launcher must
+// inject so the agent CLI routes requests through proxyURL. Both
+// Claude and Codex honor the same convention (ANTHROPIC_BASE_URL /
+// OPENAI_BASE_URL), so emitting both is harmless: each agent ignores
+// the other's variable. Splitting this out keeps the resolver's main
+// switch readable.
+func providerProxyEnv(proxyURL string) []string {
+	return []string{
+		"ANTHROPIC_BASE_URL=" + proxyURL,
+		"OPENAI_BASE_URL=" + proxyURL,
+	}
+}
+
+// IsRawTokenMode reports whether the resolved mode is
+// raw_env_explicit. Centralizing the check keeps the supervisor and
+// doctor surfaces from retyping the string literal when deciding
+// whether to print the reduced-safety warning.
+func IsRawTokenMode(mode string) bool {
+	return mode == CredentialModeRawEnvExplicit
 }
 
 // MergeEnv combines credential-mode env injection with the

@@ -97,11 +97,14 @@ const (
 	// raw token never enters the sandbox.
 	ModelCredentialProviderProxy ModelCredentialMode = "provider_proxy"
 
-	// ModelCredentialRawToken is the reduced-safety fallback: the token
-	// is injected into the agent process environment directly. The plan
-	// requires every run.json record to mark this case so audit can find
-	// it later.
-	ModelCredentialRawToken ModelCredentialMode = "raw_token"
+	// ModelCredentialRawEnvExplicit is the reduced-safety fallback:
+	// the raw provider token is injected into the agent's process
+	// environment directly. The operator must opt in with
+	// --allow-raw-model-token-in-sandbox; the plan requires every
+	// run.json record to mark this case so audit can find it later.
+	// The wire value mirrors the canonical mode name used in
+	// agents.yaml and by agents.ResolveCredentialMode.
+	ModelCredentialRawEnvExplicit ModelCredentialMode = "raw_env_explicit"
 )
 
 // Record is the in-memory representation of run.json. It is the single
