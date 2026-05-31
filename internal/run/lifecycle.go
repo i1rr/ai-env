@@ -26,7 +26,18 @@ const lifecycleFileName = "lifecycle.jsonl"
 // on-disk JSONL stays a byte-for-byte match against the documented schema
 // (json.Marshal preserves struct field order).
 //
-// All fields are required by the plan; none are marked omitempty. A
+// State-transition records have State set and Verb empty. Verb-event
+// records (proxy_started, gateway_started, observer_started, etc., per
+// Batch 0.1) have Verb set, an optional Metadata map carrying the per-
+// verb key/value table documented in lifecycle_verbs.go, and State empty.
+// The State and Verb tags both use omitempty so the on-disk record stays
+// byte-for-byte compatible with the plan's example for the state path
+// (Verb / Metadata simply do not appear) while still letting the same
+// file carry the broader lifecycle verbs Batch 0.1 introduces. A reader
+// switches on whether State or Verb is non-empty to pick the interesting
+// field set; both being empty is rejected at write time.
+//
+// RunID, Backend, Agent, and Timestamp are required on every record. A
 // missing value for backend or agent would point at a supervisor bug
 // (the supervisor knows both before it ever emits the first event), and
 // silently dropping fields would hide that.
@@ -45,7 +56,16 @@ type LifecycleEvent struct {
 	// written. State strings come straight from the State constants in
 	// state.go; the lifecycle writer does not validate them itself
 	// because the state machine already rejected unknown values upstream.
-	State State `json:"state"`
+	// Empty (omitted) on verb-event records (see Verb below); set on
+	// state-transition records.
+	State State `json:"state,omitempty"`
+
+	// Verb identifies a non-state-transition lifecycle event. Pinned to
+	// one of the LifecycleVerb* constants defined in lifecycle_verbs.go.
+	// Empty (omitted) on state-transition records; set on verb-event
+	// records. The Metadata field below carries the per-verb key/value
+	// table documented next to each constant.
+	Verb LifecycleVerb `json:"verb,omitempty"`
 
 	// Backend is the backend identifier (e.g. "docker-sbx", "local-process")
 	// the supervisor selected for this run. The plan calls this out
@@ -60,6 +80,13 @@ type LifecycleEvent struct {
 	// with a numeric timezone offset. The lifecycle writer fills this in
 	// at write time using its clock; callers do not set it themselves.
 	Timestamp string `json:"timestamp"`
+
+	// Metadata is the per-verb key/value context table documented in
+	// lifecycle_verbs.go alongside each LifecycleVerb constant. Empty
+	// (omitted) on state-transition records and on verb records that
+	// carry no per-verb payload. The map is shallow-copied at write time
+	// so subsequent caller mutations do not affect the recorded value.
+	Metadata map[string]string `json:"metadata,omitempty"`
 }
 
 // LifecycleWriter appends LifecycleEvent records to lifecycle.jsonl.
@@ -193,10 +220,12 @@ func OpenLifecycleWriter(runDir string, opts LifecycleWriterOptions) (*Lifecycle
 	}, nil
 }
 
-// Write appends a single lifecycle event for the given state to the
-// underlying lifecycle.jsonl file. The event's RunID, Backend, and Agent
-// are filled in from the writer's stored metadata; the Timestamp is
-// stamped from the writer's clock at call time. The encoded line is a
+// Write appends a single state-transition lifecycle event for the given
+// state to the underlying lifecycle.jsonl file. The event's RunID,
+// Backend, and Agent are filled in from the writer's stored metadata;
+// the Timestamp is stamped from the writer's clock at call time. Verb
+// and Metadata are left zero so the on-disk shape matches Batch 0.0's
+// byte-for-byte plan example for state records. The encoded line is a
 // single JSON object followed by exactly one newline byte.
 //
 // The plan requires that no buffered event be lost on crash, so Write
@@ -206,15 +235,13 @@ func OpenLifecycleWriter(runDir string, opts LifecycleWriterOptions) (*Lifecycle
 // an interleaved one.
 //
 // Write returns an error when the writer has already been closed, when
-// JSON encoding fails (which would only happen on an unexpected reflect
-// path; the LifecycleEvent struct has no marshal hooks), when the
-// underlying append fails, or when the fsync fails.
+// the state is empty (a zero-State record would carry neither a state
+// nor a verb after Batch 0.1's omitempty change and would be ambiguous
+// to readers), when JSON encoding fails, when the underlying append
+// fails, or when the fsync fails.
 func (w *LifecycleWriter) Write(state State) error {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-
-	if w.closed {
-		return errors.New("run: lifecycle writer is closed")
+	if state == "" {
+		return errors.New("run: lifecycle write requires non-empty state")
 	}
 
 	evt := LifecycleEvent{
@@ -222,8 +249,75 @@ func (w *LifecycleWriter) Write(state State) error {
 		State:     state,
 		Backend:   w.backend,
 		Agent:     w.agent,
-		Timestamp: w.now().Format(time.RFC3339),
+		Timestamp: "", // filled in under lock by writeEvent
 	}
+	return w.writeEvent(evt)
+}
+
+// WriteVerb appends a single non-state-transition lifecycle event for
+// the given verb to lifecycle.jsonl. Used by every supplemental
+// subsystem the supervisor stands up (ProviderProxy, MCP Gateway,
+// Network Observer, GitHub Broker, Control Socket, MCP-config
+// neutralization, transcript parser, shim install, helper RPC
+// audit, secrets-permission audit, network-policy degrade). Verbs
+// are pinned to the LifecycleVerb constants in lifecycle_verbs.go;
+// callers passing an empty verb are rejected at write time because
+// a record with neither State nor Verb cannot be classified.
+//
+// metadata may be nil for verbs that carry no per-event payload. When
+// non-nil, the writer takes a shallow defensive copy so subsequent
+// caller mutations do not affect the recorded event. The key set is
+// the per-verb table documented in lifecycle_verbs.go; the writer does
+// not enforce it (that would couple the writer to every emitter's
+// schema) — each emitter owns its completeness.
+//
+// The same fsync-per-event discipline as Write applies: a host crash
+// between WriteVerb and the next event does not lose this verb.
+func (w *LifecycleWriter) WriteVerb(verb LifecycleVerb, metadata map[string]string) error {
+	if verb == "" {
+		return errors.New("run: lifecycle WriteVerb requires non-empty verb")
+	}
+
+	// Defensive shallow copy so a caller that mutates its metadata map
+	// after WriteVerb returns (or shares the same map across calls and
+	// mutates between them) cannot retroactively change a recorded
+	// event. The cost is negligible — Metadata maps in the plan's per-
+	// verb tables top out at a handful of keys.
+	var md map[string]string
+	if len(metadata) > 0 {
+		md = make(map[string]string, len(metadata))
+		for k, v := range metadata {
+			md[k] = v
+		}
+	}
+
+	evt := LifecycleEvent{
+		RunID:     w.runID,
+		Verb:      verb,
+		Backend:   w.backend,
+		Agent:     w.agent,
+		Timestamp: "", // filled in under lock by writeEvent
+		Metadata:  md,
+	}
+	return w.writeEvent(evt)
+}
+
+// writeEvent is the shared append+fsync path used by Write and
+// WriteVerb. Pulling the lock/marshal/sync sequence into one method
+// keeps the two public entry points trivially equivalent in their
+// durability and concurrency contract, and means a future third entry
+// point cannot drift on fsync discipline.
+func (w *LifecycleWriter) writeEvent(evt LifecycleEvent) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if w.closed {
+		return errors.New("run: lifecycle writer is closed")
+	}
+
+	// Stamp the timestamp under the lock so the on-disk order of events
+	// matches the timestamp order, even under heavy concurrent writes.
+	evt.Timestamp = w.now().Format(time.RFC3339)
 
 	// Marshal then a single Write keeps the JSON object + newline as one
 	// syscall, which matters for the O_APPEND atomicity guarantee on

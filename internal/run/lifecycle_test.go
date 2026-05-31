@@ -348,6 +348,243 @@ func TestLifecycleWriter_AppendsToExistingFile(t *testing.T) {
 	}
 }
 
+// TestLifecycleWriter_WriteVerb_AppendsVerbRecord covers the Batch 0.1
+// non-state-transition path: WriteVerb appends a verb-event record
+// (Verb set, State absent) that carries the per-verb Metadata key/value
+// table documented in lifecycle_verbs.go. The on-wire JSON must round-
+// trip and the verb constant must match the plan-pinned snake_case
+// value so downstream readers can grep by verb.
+func TestLifecycleWriter_WriteVerb_AppendsVerbRecord(t *testing.T) {
+	dir := newLifecycleRunDir(t)
+
+	stamp := time.Date(2026, 5, 28, 10, 13, 0, 0, time.UTC)
+	w, err := OpenLifecycleWriter(dir.Path, LifecycleWriterOptions{
+		RunID:   dir.ID,
+		Backend: "docker-sbx",
+		Agent:   "claude",
+		Now:     fixedTimes(stamp),
+	})
+	if err != nil {
+		t.Fatalf("OpenLifecycleWriter: %v", err)
+	}
+
+	md := map[string]string{
+		"provider":      "anthropic",
+		"listen_addr":   "127.0.0.1:18443",
+		"upstream_host": "api.anthropic.com",
+		"reachability":  "setns_tcp",
+	}
+	if err := w.WriteVerb(LifecycleVerbProxyStarted, md); err != nil {
+		t.Fatalf("WriteVerb: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	raw, err := os.ReadFile(filepath.Join(dir.Path, "lifecycle.jsonl"))
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	var evt LifecycleEvent
+	if err := json.Unmarshal([]byte(strings.TrimSpace(string(raw))), &evt); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if evt.State != "" {
+		t.Errorf("verb record: State = %q, want empty", evt.State)
+	}
+	if evt.Verb != LifecycleVerbProxyStarted {
+		t.Errorf("verb record: Verb = %q, want %q", evt.Verb, LifecycleVerbProxyStarted)
+	}
+	if string(LifecycleVerbProxyStarted) != "proxy_started" {
+		t.Errorf("LifecycleVerbProxyStarted constant = %q, want %q", LifecycleVerbProxyStarted, "proxy_started")
+	}
+	if got, want := evt.Metadata["provider"], "anthropic"; got != want {
+		t.Errorf("metadata[provider] = %q, want %q", got, want)
+	}
+	if got, want := evt.Metadata["reachability"], "setns_tcp"; got != want {
+		t.Errorf("metadata[reachability] = %q, want %q", got, want)
+	}
+	if evt.Backend != "docker-sbx" {
+		t.Errorf("verb record: Backend = %q, want %q", evt.Backend, "docker-sbx")
+	}
+	if evt.Agent != "claude" {
+		t.Errorf("verb record: Agent = %q, want %q", evt.Agent, "claude")
+	}
+	if evt.Timestamp != stamp.Format(time.RFC3339) {
+		t.Errorf("verb record: Timestamp = %q, want %q", evt.Timestamp, stamp.Format(time.RFC3339))
+	}
+}
+
+// TestLifecycleWriter_WriteVerb_OmitsStateAndEmptyMetadata pins the
+// on-disk shape of a verb record without per-event payload: the JSON
+// must not carry "state" (Batch 0.0 records keep their byte-for-byte
+// shape only because verb records use omitempty in the other direction
+// too) and must not carry an empty "metadata" object. A reviewer
+// reading lifecycle.jsonl by eye distinguishes the two kinds by which
+// field is present, so an accidental empty "" state would confuse the
+// classifier.
+func TestLifecycleWriter_WriteVerb_OmitsStateAndEmptyMetadata(t *testing.T) {
+	dir := newLifecycleRunDir(t)
+
+	stamp := time.Date(2026, 5, 28, 10, 13, 0, 0, time.UTC)
+	w, err := OpenLifecycleWriter(dir.Path, LifecycleWriterOptions{
+		RunID:   "20260528-101300-a1b2c3",
+		Backend: "docker-sbx",
+		Agent:   "claude",
+		Now:     fixedTimes(stamp),
+	})
+	if err != nil {
+		t.Fatalf("OpenLifecycleWriter: %v", err)
+	}
+
+	// Pass nil metadata: the verb is one of the documented "no payload"
+	// shapes (none of the Batch 0.1 verbs are strictly payload-free, but
+	// the writer must still drop an empty/nil map to keep the record
+	// compact for those callers that legitimately have nothing to say).
+	if err := w.WriteVerb(LifecycleVerbControlSocketStarted, nil); err != nil {
+		t.Fatalf("WriteVerb: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	raw, err := os.ReadFile(filepath.Join(dir.Path, "lifecycle.jsonl"))
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	want := `{"run_id":"20260528-101300-a1b2c3","verb":"control_socket_started","backend":"docker-sbx","agent":"claude","timestamp":"2026-05-28T10:13:00Z"}` + "\n"
+	if string(raw) != want {
+		t.Errorf("lifecycle.jsonl =\n%q\nwant\n%q", string(raw), want)
+	}
+}
+
+// TestLifecycleWriter_WriteVerb_RejectsEmptyVerb makes sure a caller
+// bug (forgot the constant, accidentally passed "") fails loud instead
+// of writing a record with neither State nor Verb — such a record would
+// be unclassifiable by downstream readers.
+func TestLifecycleWriter_WriteVerb_RejectsEmptyVerb(t *testing.T) {
+	dir := newLifecycleRunDir(t)
+
+	w, err := OpenLifecycleWriter(dir.Path, LifecycleWriterOptions{
+		RunID:   dir.ID,
+		Backend: "docker-sbx",
+		Agent:   "claude",
+	})
+	if err != nil {
+		t.Fatalf("OpenLifecycleWriter: %v", err)
+	}
+	defer w.Close()
+
+	if err := w.WriteVerb("", map[string]string{"k": "v"}); err == nil {
+		t.Error("WriteVerb(empty): expected error, got nil")
+	}
+}
+
+// TestLifecycleWriter_Write_RejectsEmptyState mirrors the verb check:
+// the state path also refuses zero values now that omitempty would
+// otherwise produce an unclassifiable record.
+func TestLifecycleWriter_Write_RejectsEmptyState(t *testing.T) {
+	dir := newLifecycleRunDir(t)
+
+	w, err := OpenLifecycleWriter(dir.Path, LifecycleWriterOptions{
+		RunID:   dir.ID,
+		Backend: "docker-sbx",
+		Agent:   "claude",
+	})
+	if err != nil {
+		t.Fatalf("OpenLifecycleWriter: %v", err)
+	}
+	defer w.Close()
+
+	if err := w.Write(""); err == nil {
+		t.Error("Write(empty): expected error, got nil")
+	}
+}
+
+// TestLifecycleWriter_WriteVerb_CopiesMetadata defends the writer's
+// shallow-copy invariant: a caller mutating the metadata map after
+// WriteVerb returns must not retroactively alter the on-disk record.
+// Same-map reuse across verb emissions is a realistic pattern (a
+// subsystem with a persistent context object that it keeps writing
+// updated values into), and the writer must not be the leaky path.
+func TestLifecycleWriter_WriteVerb_CopiesMetadata(t *testing.T) {
+	dir := newLifecycleRunDir(t)
+
+	w, err := OpenLifecycleWriter(dir.Path, LifecycleWriterOptions{
+		RunID:   dir.ID,
+		Backend: "docker-sbx",
+		Agent:   "claude",
+		Now:     fixedTimes(time.Date(2026, 5, 28, 10, 13, 0, 0, time.UTC)),
+	})
+	if err != nil {
+		t.Fatalf("OpenLifecycleWriter: %v", err)
+	}
+
+	md := map[string]string{"reason": "teardown"}
+	if err := w.WriteVerb(LifecycleVerbProxyStopped, md); err != nil {
+		t.Fatalf("WriteVerb: %v", err)
+	}
+	// Mutate the map AFTER the call returned; if the writer kept the
+	// caller's map by reference, this would corrupt the recorded
+	// payload (in practice via the encoded JSON staying the original,
+	// but the test is the contract that future refactors must not
+	// regress on).
+	md["reason"] = "mutated"
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	raw, err := os.ReadFile(filepath.Join(dir.Path, "lifecycle.jsonl"))
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	var evt LifecycleEvent
+	if err := json.Unmarshal([]byte(strings.TrimSpace(string(raw))), &evt); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got := evt.Metadata["reason"]; got != "teardown" {
+		t.Errorf("metadata[reason] = %q, want %q (post-call mutation leaked into recorded event)", got, "teardown")
+	}
+}
+
+// TestLifecycleVerbs_PlanPinnedNames pins every Batch 0.1 verb constant
+// against its plan-documented snake_case string. A reviewer changing
+// the wire value (rename "proxy_started" -> "proxyStarted") fails this
+// test instead of silently breaking downstream readers (leaks.jsonl
+// aggregator, final-summary renderer) that grep by these literals.
+func TestLifecycleVerbs_PlanPinnedNames(t *testing.T) {
+	cases := []struct {
+		got  LifecycleVerb
+		want string
+	}{
+		{LifecycleVerbProxyStarted, "proxy_started"},
+		{LifecycleVerbProxyStopped, "proxy_stopped"},
+		{LifecycleVerbGatewayStarted, "gateway_started"},
+		{LifecycleVerbGatewayStopped, "gateway_stopped"},
+		{LifecycleVerbGatewaySecretBlocked, "gateway_secret_blocked"},
+		{LifecycleVerbGatewaySecretResponse, "gateway_secret_response"},
+		{LifecycleVerbObserverStarted, "observer_started"},
+		{LifecycleVerbObserverStopped, "observer_stopped"},
+		{LifecycleVerbObserverUnavailable, "observer_unavailable"},
+		{LifecycleVerbBrokerStarted, "broker_started"},
+		{LifecycleVerbBrokerStopped, "broker_stopped"},
+		{LifecycleVerbBrokerUnavailable, "broker_unavailable"},
+		{LifecycleVerbControlSocketStarted, "control_socket_started"},
+		{LifecycleVerbControlSocketStopped, "control_socket_stopped"},
+		{LifecycleVerbNetworkPolicyDegraded, "network_policy_degraded"},
+		{LifecycleVerbSecretsPermissionWarning, "secrets_permission_warning"},
+		{LifecycleVerbShimCoverageDegraded, "shim_coverage_degraded"},
+		{LifecycleVerbHelperRPCAborted, "helper_rpc_aborted"},
+		{LifecycleVerbTranscriptParserError, "transcript_parser_error"},
+		{LifecycleVerbMCPConfigNeutralized, "mcp_config_neutralized"},
+	}
+	for _, c := range cases {
+		if string(c.got) != c.want {
+			t.Errorf("verb constant for %q = %q", c.want, string(c.got))
+		}
+	}
+}
+
 // TestLifecycleWriter_DefaultsToTimeNow confirms the nil-clock fallback
 // path produces a syntactically valid timestamp rather than a zero or
 // empty string. The fallback is what production callers rely on; only

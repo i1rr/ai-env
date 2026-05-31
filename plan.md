@@ -112,7 +112,7 @@ All five per-subsystem streams stay as **source of truth**. `leaks.jsonl` is the
 - Per-run primary `control_token` (32 random b64 bytes) injected into helper processes ONLY (not the agent's env). Per-server `server_token`s rotated per run.
 - Acceptance: as iter-3 + `TestControlSocket_AcceptingShutdown_RejectsNewRPCs`, `TestControlSocket_PerServerTokenScoping` — agent-readable server_token cannot authorize calls to a different server.
 
-**Batch 0.1 — Lifecycle verbs + per-verb Metadata schema**
+**Batch 0.1 — Lifecycle verbs + per-verb Metadata schema** [x]
 - Add constants (each with inline Metadata key table): `proxy_started/_stopped`, `gateway_started/_stopped/_secret_blocked/_secret_response`, `observer_started/_stopped/_unavailable`, `broker_started/_stopped/_unavailable`, `control_socket_started/_stopped`, `network_policy_degraded`, `secrets_permission_warning`, `shim_coverage_degraded`, `helper_rpc_aborted`, `transcript_parser_error`, `mcp_config_neutralized` (NEW — workspace-local config renamed).
 
 **Batch 0.2 — `leaks.jsonl` + broadened RedactSecrets**
