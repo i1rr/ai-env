@@ -46,8 +46,205 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(newScanCmd())
 	root.AddCommand(newPolicyCmd())
 	root.AddCommand(newDestroyCmd())
+	root.AddCommand(newMCPCmd())
 
 	return root
+}
+
+// newMCPCmd builds the `ai-env mcp` parent command and attaches its
+// subcommands (list, add, pin, scan, remove). The parent has no body
+// of its own; running it prints the standard Cobra help so operators
+// can discover the subcommands via `ai-env mcp -h` (plan 09 step 6).
+func newMCPCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "mcp",
+		Short: "Inspect and mutate the project's mcp.yaml MCP server registry",
+		Long: "Inspect and mutate the project's .ai-env/mcp.yaml document. " +
+			"Use `list` to see registered servers with their pinned version, " +
+			"digest, schema hash, and scope; `add <server>` to register a " +
+			"new server (creates mcp.yaml with default deny when missing); " +
+			"`pin <server>` to lock the tool schema hash after the first " +
+			"launch; `scan <server>` to dry-run the gateway AuthorizeLaunch " +
+			"verdict against operator-supplied candidate metadata; and " +
+			"`remove <server>` to deregister a server.",
+	}
+	cmd.AddCommand(newMCPListCmd())
+	cmd.AddCommand(newMCPAddCmd())
+	cmd.AddCommand(newMCPPinCmd())
+	cmd.AddCommand(newMCPScanCmd())
+	cmd.AddCommand(newMCPRemoveCmd())
+	return cmd
+}
+
+// newMCPListCmd builds `ai-env mcp list`. The body lives in
+// internal/cli.RunMCPList; the Cobra layer is a thin pass-through.
+func newMCPListCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "list",
+		Short: "List registered MCP servers with their pinned metadata",
+		Long: "List every MCP server in the project's mcp.yaml. The table " +
+			"shows the server name, source pin (npm:/oci:), digest, " +
+			"schema hash, declared scope kinds, and per-server policy " +
+			"(allow / deny / warn).",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return cli.RunMCPList(cli.MCPListOptions{
+				Stdout: cmd.OutOrStdout(),
+				Stderr: cmd.ErrOrStderr(),
+			})
+		},
+	}
+}
+
+// newMCPAddCmd builds `ai-env mcp add <server> --source ...`.
+func newMCPAddCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "add <server> --source <source> [flags]",
+		Short: "Register a new MCP server in mcp.yaml",
+		Long: "Register a new MCP server in the project's mcp.yaml. The " +
+			"file is created with default=deny when missing. --source " +
+			"is required and must be a pinned npm:<pkg>@<version> or " +
+			"oci:<image>:<tag> string. --digest is optional " +
+			"(sha256:<hex>); --schema-hash is optional and lets the " +
+			"operator add and pin in one step. --policy defaults to " +
+			"allow. Scope flags (--scope-filesystem-root, " +
+			"--scope-github-repos, --scope-github-operations) declare " +
+			"the per-server scope. Refuses to overwrite an existing " +
+			"entry without --force.",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			opts := cli.MCPAddOptions{
+				Name:   args[0],
+				Stdout: cmd.OutOrStdout(),
+				Stderr: cmd.ErrOrStderr(),
+			}
+			var err error
+			if opts.Source, err = cmd.Flags().GetString("source"); err != nil {
+				return fmt.Errorf("ai-env mcp add: read --source: %w", err)
+			}
+			if opts.Digest, err = cmd.Flags().GetString("digest"); err != nil {
+				return fmt.Errorf("ai-env mcp add: read --digest: %w", err)
+			}
+			if opts.SchemaHash, err = cmd.Flags().GetString("schema-hash"); err != nil {
+				return fmt.Errorf("ai-env mcp add: read --schema-hash: %w", err)
+			}
+			if opts.Policy, err = cmd.Flags().GetString("policy"); err != nil {
+				return fmt.Errorf("ai-env mcp add: read --policy: %w", err)
+			}
+			if opts.ScopeFilesystemRoot, err = cmd.Flags().GetString("scope-filesystem-root"); err != nil {
+				return fmt.Errorf("ai-env mcp add: read --scope-filesystem-root: %w", err)
+			}
+			if opts.ScopeGitHubRepos, err = cmd.Flags().GetString("scope-github-repos"); err != nil {
+				return fmt.Errorf("ai-env mcp add: read --scope-github-repos: %w", err)
+			}
+			if opts.ScopeGitHubOperations, err = cmd.Flags().GetString("scope-github-operations"); err != nil {
+				return fmt.Errorf("ai-env mcp add: read --scope-github-operations: %w", err)
+			}
+			if opts.Force, err = cmd.Flags().GetBool("force"); err != nil {
+				return fmt.Errorf("ai-env mcp add: read --force: %w", err)
+			}
+			return cli.RunMCPAdd(opts)
+		},
+	}
+	cmd.Flags().String("source", "", "Pinned source string (npm:<pkg>@<version> or oci:<image>:<tag>) (required)")
+	cmd.Flags().String("digest", "", "Optional sha256:<hex> content digest")
+	cmd.Flags().String("schema-hash", "", "Optional sha256:<hex> tool-schema hash (also see `ai-env mcp pin`)")
+	cmd.Flags().String("policy", "allow", "Per-server policy: allow, deny, or warn")
+	cmd.Flags().String("scope-filesystem-root", "", "Filesystem scope root token (workspace_only)")
+	cmd.Flags().String("scope-github-repos", "", "GitHub scope repos token (current_repo_only)")
+	cmd.Flags().String("scope-github-operations", "", "GitHub scope operations token (read_only or read_write); defaults to read_only when --scope-github-repos is set")
+	cmd.Flags().Bool("force", false, "Replace an existing registration in place")
+	_ = cmd.MarkFlagRequired("source")
+	return cmd
+}
+
+// newMCPPinCmd builds `ai-env mcp pin <server> --schema-hash <hash>`.
+func newMCPPinCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "pin <server> --schema-hash <hash>",
+		Short: "Pin a tool-schema hash on an existing MCP server entry",
+		Long: "Pin (or replace) the schema_hash field on an existing MCP " +
+			"server entry in mcp.yaml. Typically used after the first " +
+			"launch records a live schema hash via the gateway's " +
+			"SchemaOutcomeRecord onboarding path. Refuses to pin if the " +
+			"named server is not registered.",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			hash, err := cmd.Flags().GetString("schema-hash")
+			if err != nil {
+				return fmt.Errorf("ai-env mcp pin: read --schema-hash: %w", err)
+			}
+			return cli.RunMCPPin(cli.MCPPinOptions{
+				Name:       args[0],
+				SchemaHash: hash,
+				Stdout:     cmd.OutOrStdout(),
+				Stderr:     cmd.ErrOrStderr(),
+			})
+		},
+	}
+	cmd.Flags().String("schema-hash", "", "sha256:<hex> tool-schema hash to pin (required)")
+	_ = cmd.MarkFlagRequired("schema-hash")
+	return cmd
+}
+
+// newMCPScanCmd builds `ai-env mcp scan <server>`.
+func newMCPScanCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "scan <server> [--source ...] [--digest ...] [--schema-hash ...]",
+		Short: "Dry-run the MCP gateway AuthorizeLaunch verdict for a server",
+		Long: "Dry-run the MCP gateway's AuthorizeLaunch verdict for a " +
+			"server without spawning the server process. Loads mcp.yaml, " +
+			"builds a Gateway with a no-op audit logger, and prints the " +
+			"decision plus the reason. A Block verdict exits non-zero so " +
+			"the command is usable in CI; a Warn verdict prints the " +
+			"warning to stderr but exits 0. Operator may supply " +
+			"candidate --source / --digest / --schema-hash to exercise " +
+			"the corresponding pin dimension; empty values skip the " +
+			"dimension.",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			opts := cli.MCPScanOptions{
+				Name:   args[0],
+				Stdout: cmd.OutOrStdout(),
+				Stderr: cmd.ErrOrStderr(),
+			}
+			var err error
+			if opts.Source, err = cmd.Flags().GetString("source"); err != nil {
+				return fmt.Errorf("ai-env mcp scan: read --source: %w", err)
+			}
+			if opts.Digest, err = cmd.Flags().GetString("digest"); err != nil {
+				return fmt.Errorf("ai-env mcp scan: read --digest: %w", err)
+			}
+			if opts.SchemaHash, err = cmd.Flags().GetString("schema-hash"); err != nil {
+				return fmt.Errorf("ai-env mcp scan: read --schema-hash: %w", err)
+			}
+			return cli.RunMCPScan(opts)
+		},
+	}
+	cmd.Flags().String("source", "", "Candidate source string the launcher would resolve to (skipped when empty)")
+	cmd.Flags().String("digest", "", "Candidate sha256:<hex> content digest (skipped when empty)")
+	cmd.Flags().String("schema-hash", "", "Candidate sha256:<hex> tool-schema hash to compare (skipped when empty)")
+	return cmd
+}
+
+// newMCPRemoveCmd builds `ai-env mcp remove <server>`.
+func newMCPRemoveCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "remove <server>",
+		Short: "Deregister an MCP server from mcp.yaml",
+		Long: "Remove a registered MCP server from the project's mcp.yaml. " +
+			"Refuses if the named server is not registered, and refuses " +
+			"to remove the last remaining server (delete mcp.yaml " +
+			"directly to disable MCP entirely).",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return cli.RunMCPRemove(cli.MCPRemoveOptions{
+				Name:   args[0],
+				Stdout: cmd.OutOrStdout(),
+				Stderr: cmd.ErrOrStderr(),
+			})
+		},
+	}
 }
 
 // newPolicyCmd builds the `ai-env policy` parent command and attaches
