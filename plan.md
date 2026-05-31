@@ -80,7 +80,7 @@ servers:
 6. [x] Implement `ai-env mcp list`, `ai-env mcp add <server>`, `ai-env mcp pin <server>`, `ai-env mcp scan <server>`, `ai-env mcp remove <server>`.
 7. [x] Add `mcp-calls.jsonl` to run directory layout.
 8. [x] Write `docs/mcp-security.md`: MCP risks, gateway model, server registration.
-9. Add acceptance tests:
+9. [x] Add acceptance tests:
    - Unknown MCP server is blocked.
    - Changed tool schema triggers warning or block.
    - Filesystem MCP cannot read outside workspace.
