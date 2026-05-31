@@ -308,37 +308,58 @@ func newPatchCmd() *cobra.Command {
 
 // newPRCmd builds the `ai-env pr` subcommand. Flag parsing happens here;
 // the actual export logic lives in internal/cli so it can be tested
-// without involving Cobra. Plan 06 step 8 wires the export gate into
-// this command as a stub: the gate is evaluated under ModePR (so
-// workflow changes and other PR-only hard blockers fire), but the
-// brokered PR push itself is implemented in Plan 07.
+// without involving Cobra.
+//
+// Plan 07 step 10 wires the GitHubBroker into this command and plan 07
+// step 11 keeps the ExportGate as the gate-keeper that runs before any
+// broker action. The Cobra layer is intentionally thin: it parses
+// --run and --draft, delegates to cli.RunPR, and leaves the lifecycle
+// (gate -> broker prepare -> token -> push -> scan -> create PR ->
+// revoke) to the internal package so the same flow is unit-testable
+// without standing up Cobra.
+//
+// --draft defaults to true because plan 07 fixes draft-only as the
+// v0.1 surface. The flag exists so a future operator opt-in for
+// non-draft PRs can be added without changing the call site; for now
+// passing --draft=false is accepted but the broker still opens a
+// draft PR.
 func newPRCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "pr <env-name>",
-		Short: "Evaluate the export gate for an ai-env workspace under PR mode",
-		Long: "Evaluate the export gate for an ai-env workspace as if its " +
-			"diff were about to be shipped through the brokered PR path. " +
-			"All hard blockers (secret leaks, workflow changes, .ai-env " +
-			"modifications, quarantine) refuse the export with a non-zero " +
-			"exit. The actual PR push to the host (creating the brokered " +
-			"branch, opening the pull request) is wired in plan 07; until " +
-			"then this command surfaces the gate verdict so an operator " +
-			"can preview the decision locally.",
+		Use:   "pr <env-name> [--draft]",
+		Short: "Open a brokered draft PR for an ai-env workspace",
+		Long: "Open a brokered draft pull request for an ai-env workspace. " +
+			"The export gate is evaluated first under ModePR: all hard " +
+			"blockers (secret leaks, workflow changes, .ai-env modifications, " +
+			"quarantine) refuse the export with a non-zero exit and the " +
+			"broker is never invoked. If the gate allows, the GitHubBroker " +
+			"prepares the PR (validating branch prefix and protected paths), " +
+			"acquires a short-lived credential, pushes the workspace branch, " +
+			"scans the PR metadata (title, body, branch, commit messages), " +
+			"creates a draft PR, and revokes the credential. When no broker " +
+			"is configured (no GitHub App or PAT fallback wired) the " +
+			"command falls back to a preview-only verdict so an operator " +
+			"can still inspect the gate decision locally.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			runID, err := cmd.Flags().GetString("run")
 			if err != nil {
 				return fmt.Errorf("ai-env pr: read --run: %w", err)
 			}
+			draft, err := cmd.Flags().GetBool("draft")
+			if err != nil {
+				return fmt.Errorf("ai-env pr: read --draft: %w", err)
+			}
 			return cli.RunPR(cli.PROptions{
 				EnvName: args[0],
 				RunID:   runID,
+				Draft:   draft,
 				Stdout:  cmd.OutOrStdout(),
 				Stderr:  cmd.ErrOrStderr(),
 			})
 		},
 	}
 	cmd.Flags().String("run", "", "Specific run id whose scan / record the export gate consults (defaults to the env's latest run)")
+	cmd.Flags().Bool("draft", true, "Open the PR as a draft (default true; plan 07 fixes draft-only for v0.1)")
 	return cmd
 }
 
