@@ -67,7 +67,7 @@ servers:
    - Compute hash of server tool schema on first registration.
    - Compare on each launch.
    - Warn or block if schema changed.
-3. Implement MCP gateway proxy:
+3. [x] Implement MCP gateway proxy:
    - Intercept MCP requests from the agent.
    - Validate server registration.
    - Apply scope constraints (filesystem root, GitHub repo, etc.).
