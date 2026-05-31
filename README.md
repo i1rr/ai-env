@@ -2,11 +2,11 @@
 
 `ai-env` is a Go CLI that scaffolds isolated sandbox environments for AI coding agents. It keeps each agent's work in its own workspace and configuration tree under `.ai-env/`, separate from your active working copy.
 
-This repository contains plans 01 through 06: project scaffolding, configuration loading and validation, workspace isolation via Git worktrees or directory copies, diff and patch export, protected path matching, the run-lifecycle supervisor (run IDs, run directory layout, lifecycle state machine, disk-streamed stdout/stderr capture, max-runtime and signal handling, partial-diff collection, and the `--continue` link), the Backend interface with a Docker Sandboxes (`sbx`) adapter, rootless Docker and Podman fallback backends, and an in-memory mock, agent launchers for Claude Code and Codex with version, flag, and credential probing, the `ai-env agents` family of subcommands, the canonical runtime `NetworkPolicy` plus `NetworkPolicyAdapter` interface with fail-closed supervisor wiring, a host-side provider proxy that fronts Anthropic / OpenAI traffic with redacted logs, per-run `network-events.jsonl`, the `ai-env report` subcommand, the per-run `final-summary.md` that includes the network section, and the scanning and export-gate stack (built-in pattern-only secret scanner, warn-only entropy analyzer, gitleaks adapter, optional external scanner discovery, `ai-env scan` subcommand, and the `ExportGate` wired into `ai-env patch` and `ai-env pr`).
+This repository contains plans 01 through 07: project scaffolding, configuration loading and validation, workspace isolation via Git worktrees or directory copies, diff and patch export, protected path matching, the run-lifecycle supervisor (run IDs, run directory layout, lifecycle state machine, disk-streamed stdout/stderr capture, max-runtime and signal handling, partial-diff collection, and the `--continue` link), the Backend interface with a Docker Sandboxes (`sbx`) adapter, rootless Docker and Podman fallback backends, and an in-memory mock, agent launchers for Claude Code and Codex with version, flag, and credential probing, the `ai-env agents` family of subcommands, the canonical runtime `NetworkPolicy` plus `NetworkPolicyAdapter` interface with fail-closed supervisor wiring, a host-side provider proxy that fronts Anthropic / OpenAI traffic with redacted logs, per-run `network-events.jsonl`, the `ai-env report` subcommand, the per-run `final-summary.md` that includes the network section, the scanning and export-gate stack (built-in pattern-only secret scanner, warn-only entropy analyzer, gitleaks adapter, optional external scanner discovery, `ai-env scan` subcommand, and the `ExportGate` wired into `ai-env patch` and `ai-env pr`), and the GitHub broker that opens draft pull requests without leaking a raw token into the sandbox (branch-prefix and protected-branch enforcement, path-gate checks, PR-metadata secret scanning, broker-generated PR body, GitHub App installation token flow with PAT development fallback, in-memory token holder with TTL and revocation, log redaction of token-like strings, the `ai-env pr` broker wiring with the ExportGate running first, and per-stage `policy-decisions.jsonl` events).
 
 ## Status
 
-Plans 01, 02, 03, 04, 05, and 06 complete. The CLI builds and runs on macOS and Linux, has unit and integration tests for config, scaffold, stack detection, gitignore handling, workspace materialization (Git and non-Git fixtures), diff and patch generation, protected path patterns, run-ID uniqueness within the same second, max-runtime timeout, SIGINT log/diff preservation, `sbx` version compatibility, agent flag selection, credential-mode resolution, the network policy validator, the `docker_sbx` policy adapter, the docker / podman fallback adapters (including the `--accept-reduced-isolation` and `--unsafe-host-network` gates), the provider proxy (loopback bind, upstream domain pin, host-side auth injection, log redaction, shutdown), the `network-events.jsonl` writer and summary, the `ai-env report` renderer, the `final-summary.md` writer, the built-in pattern scanner (provider API keys, PEM private-key headers, `.env`-style assignments, allowlist comments), the warn-only entropy analyzer, the gitleaks adapter, external-scanner discovery (missing tools warn rather than crash), the `ai-env scan` subcommand, the `ExportGate` (hard vs. configurable blockers, `ModePatch` vs. `ModePR`), and the scan hook wired into the supervisor's `StateScanning` step. CI runs `gofmt`, `go vet`, `go test -race`, `staticcheck`, and `govulncheck` via GitHub Actions. Real-backend and real-agent integration tests are gated behind `AI_ENV_BACKEND_INTEGRATION=1` and skip cleanly when their host prerequisites are absent.
+Plans 01, 02, 03, 04, 05, 06, and 07 complete. The CLI builds and runs on macOS and Linux, has unit and integration tests for config, scaffold, stack detection, gitignore handling, workspace materialization (Git and non-Git fixtures), diff and patch generation, protected path patterns, run-ID uniqueness within the same second, max-runtime timeout, SIGINT log/diff preservation, `sbx` version compatibility, agent flag selection, credential-mode resolution, the network policy validator, the `docker_sbx` policy adapter, the docker / podman fallback adapters (including the `--accept-reduced-isolation` and `--unsafe-host-network` gates), the provider proxy (loopback bind, upstream domain pin, host-side auth injection, log redaction, shutdown), the `network-events.jsonl` writer and summary, the `ai-env report` renderer, the `final-summary.md` writer, the built-in pattern scanner (provider API keys, PEM private-key headers, `.env`-style assignments, allowlist comments), the warn-only entropy analyzer, the gitleaks adapter, external-scanner discovery (missing tools warn rather than crash), the `ai-env scan` subcommand, the `ExportGate` (hard vs. configurable blockers, `ModePatch` vs. `ModePR`), the scan hook wired into the supervisor's `StateScanning` step, branch-prefix and protected-branch validation, broker path-gate checks, PR metadata scanning, broker-generated PR body, GitHub App installation token + PAT fallback selection, `TokenHolder` TTL clamping and revocation, broker log redaction (`RedactTokens`, `RedactingWriter`), the `ai-env pr` broker lifecycle (gate, prepare, acquire, push, scan, create, revoke) with raw-token-invisibility and revocation acceptance tests, and the per-run `policy-decisions.jsonl` writer wired into both `ai-env patch` and `ai-env pr`. CI runs `gofmt`, `go vet`, `go test -race`, `staticcheck`, and `govulncheck` via GitHub Actions. Real-backend and real-agent integration tests are gated behind `AI_ENV_BACKEND_INTEGRATION=1` and skip cleanly when their host prerequisites are absent.
 
 ## Installation
 
@@ -99,13 +99,16 @@ Runs the built-in pattern-only secret scanner against the workspace diff plus ev
 
 The summary block is stable (one label per line) and ends with a `result:` line that names the number of blocking findings the gate will see, so `ai-env scan` and a subsequent `ai-env patch` always agree on the verdict.
 
-### `ai-env pr <env-name> [--run <id>]`
+### `ai-env pr <env-name> [--run <id>] [--draft]`
 
-Evaluates the export gate for an env under `ModePR`. The actual brokered PR push lands with plan 07; until then the command is the gate-only preview a user runs locally before shipping.
+Opens a brokered draft pull request for an env. The export gate is evaluated first under `ModePR`; if it allows, the `GitHubBroker` (see "GitHub broker" below) runs the prepare / acquire-token / push / metadata-scan / create / revoke sequence the plan's "Token lifecycle" diagram fixes.
 
 - `--run <id>`: same semantics as `ai-env patch --run`.
-- The gate is run under `ModePR`, which upgrades a `.github/workflows/**` change from a warning (under `ModePatch`) to a hard block. Every other hard blocker (`secret_finding`, `external_secret_finding`, `ai_env_change`, `policy_change`, `quarantine`) fires identically across the two modes.
-- A block verdict prints the blocking reasons to stderr and exits non-zero; an allow verdict prints a per-file preview, any warnings, and a `note: PR push is not yet implemented (wired in plan 07); gate verdict only` line so the operator knows no network call was made.
+- `--draft`: defaults to `true`. Plan 07 fixes draft-only as the v0.1 surface; the flag exists so a future non-draft opt-in can be added without changing the call site, but for now passing `--draft=false` still produces a draft PR.
+- The gate runs under `ModePR`, which upgrades a `.github/workflows/**` change from a warning (under `ModePatch`) to a hard block. Every other hard blocker (`secret_finding`, `external_secret_finding`, `ai_env_change`, `policy_change`, `quarantine`) fires identically across the two modes. A block verdict prints the blocking reasons to stderr and exits non-zero; the broker is neither constructed nor invoked, so no credential is acquired and no GitHub API call is made.
+- When the gate allows and a broker is configured, the broker runs in the order the plan pins: `Prepare` (branch prefix, protected branch, path gate), `AcquireToken` (short-lived GitHub App installation token or PAT fallback), `PushBranch` (host-side push with the credential injected into the git transport, never into shell history or the agent's environment), `ScanMetadata` (built-in scanner over PR title, body, branch name, and commit messages), `CreateDraftPR`, and `RevokeToken`. `RevokeToken` is always attempted via a deferred call so a mid-lifecycle failure still scrubs the credential.
+- When the gate allows but no broker is configured, the command falls back to a preview-only verdict (per-file summary, any warnings, and a `note: broker not configured; PR push skipped (gate verdict only)` line) so an operator on a workstation without a GitHub App or PAT can still inspect the gate decision locally.
+- Every gate verdict and every broker-lifecycle stage outcome (`broker_prepare`, `broker_acquire_token`, `broker_push_branch`, `broker_scan_metadata`, `broker_create_pr`, `broker_revoke_token`) is appended to `.ai-env/runs/<run-id>/policy-decisions.jsonl` as a single-line JSON record. The on-disk file is the audit trail for "why did this run not produce a PR" and survives across processes; see "Policy decisions" below.
 
 ### `ai-env status <env-name>`
 
@@ -171,7 +174,7 @@ When the supervisor (`internal/run`) drives a run, it materializes everything un
   shell-commands.jsonl # populated by shell shim (later plans)
   filesystem-events.jsonl
   network-events.jsonl # one JSON object per network decision (plan 05)
-  policy-decisions.jsonl
+  policy-decisions.jsonl # one JSON object per export-gate verdict and broker stage (plan 07)
   git-diff.patch       # partial diff collected on stop
   secret-scan.json     # built-in + gitleaks scan output (plan 06)
   dependency-report.json # discovered vulnerability scanners + their results (plan 06)
@@ -230,7 +233,7 @@ On every terminal the supervisor's finalizer runs an orderly shutdown:
 
 The previous run's workspace is left exactly as the agent left it: no checkout, no reset, no clean. The supervisor's main loop opens the workspace via `workspace.ReadMetadata` at wire time, and that metadata was written once by `ai-env new`, so the agent on the new run sees the workspace in the same state as the previous run left it. The continuation relationship lives only in `run.json`'s `linked_previous_run` field; no special lifecycle event is emitted.
 
-Note: the supervisor primitives, status, logs, list-with-run-state, and `--continue` plumbing all landed in plan 03. The Backend interface, agent launchers, and `ai-env agents` subcommands documented below landed in plan 04 alongside the supervisor's optional `BackendAdapter` seam. Plan 05 added the canonical `NetworkPolicy`, the `NetworkPolicyAdapter` interface, the docker_sbx network adapter, the rootless docker / podman fallback backends, the host-side provider proxy, the `network-events.jsonl` writer, the `ai-env report` subcommand, and the `final-summary.md` writer (with the network section). Plan 06 added the built-in pattern-only secret scanner, the warn-only entropy analyzer, the gitleaks adapter, optional external scanner discovery, the `ai-env scan` subcommand, the `ExportGate` (wired into `ai-env patch` and `ai-env pr`), and the `ScanHook` seam the supervisor invokes during `StateScanning`. The user-facing `ai-env run` subcommand that wires the supervisor, the backend, the network adapter, the provider proxy, and the scan hook together end-to-end is tracked in a later plan.
+Note: the supervisor primitives, status, logs, list-with-run-state, and `--continue` plumbing all landed in plan 03. The Backend interface, agent launchers, and `ai-env agents` subcommands documented below landed in plan 04 alongside the supervisor's optional `BackendAdapter` seam. Plan 05 added the canonical `NetworkPolicy`, the `NetworkPolicyAdapter` interface, the docker_sbx network adapter, the rootless docker / podman fallback backends, the host-side provider proxy, the `network-events.jsonl` writer, the `ai-env report` subcommand, and the `final-summary.md` writer (with the network section). Plan 06 added the built-in pattern-only secret scanner, the warn-only entropy analyzer, the gitleaks adapter, optional external scanner discovery, the `ai-env scan` subcommand, the `ExportGate` (wired into `ai-env patch` and `ai-env pr`), and the `ScanHook` seam the supervisor invokes during `StateScanning`. Plan 07 added the GitHub broker (`internal/githubbroker/`): the `GitHubBroker` interface, the GitHub App installation token and PAT-fallback `TokenSource` implementations, the in-memory `TokenHolder` with TTL clamping and revocation, branch-prefix / protected-branch / path-gate validation, PR-metadata secret scanning, broker-generated PR body, log redaction (`RedactTokens`, `NewRedactingLogger`, `NewRedactingWriter`), the `ai-env pr` broker wiring with the `ExportGate` running first, and the `PolicyDecisionsWriter` that persists gate verdicts and broker lifecycle outcomes into `policy-decisions.jsonl`. The user-facing `ai-env run` subcommand that wires the supervisor, the backend, the network adapter, the provider proxy, and the scan hook together end-to-end is tracked in a later plan.
 
 ## Backend abstraction
 
@@ -386,6 +389,61 @@ The contract is deliberate:
 - The hook only runs on the happy path. Timeouts, idle kills, SIGINT, `failed_agent`, `failed_backend`, and `failed_policy` transitions never reach `StateScanning`, by design: the agent never produced a completion edge there is nothing to scan.
 - The hook is bounded by `SupervisorOptions.ScanTimeout` (default five minutes). A wedged external scanner cannot block the supervisor's terminal walk indefinitely.
 
+## GitHub broker
+
+The GitHub broker in `internal/githubbroker/` is the host-side component `ai-env pr` uses to open a draft pull request without ever putting a raw GitHub token inside the sandbox. The package defines a single `GitHubBroker` interface plus the supporting validation, scanning, body-generation, auth, token-lifecycle, and redaction helpers; the CLI invokes the lifecycle in the exact order the master plan's "Token lifecycle" diagram pins.
+
+### Interface and lifecycle
+
+`GitHubBroker` has six methods, one per lifecycle stage:
+
+1. `Prepare(envName, branchName, repo)` validates the static rules that do not need a token or a network round-trip: branch prefix (`ai-env/`), protected branch (`main`, `master`, `Repo.DefaultBranch`, plus any policy extras), and the path-gate check (workspace diff touching `.github/workflows/**`, `.ai-env/**`, `infra/**`, `terraform/**`, or any other path the policy's `block_auto_pr_on_paths` list covers). On success it returns an immutable `BrokerContext` snapshot threaded through every later call.
+2. `AcquireToken(ctx)` obtains a short-lived credential from the configured `TokenSource` and returns an opaque `BrokerToken` handle (Kind, Handle, IssuedAt, TTL). The raw secret is held in the broker's in-memory `TokenHolder`; callers never see the bytes.
+3. `PushBranch(ctx, token)` ships the workspace branch to the remote. The broker materializes the credential into the git transport (HTTPS clone URL or authorization header) and immediately discards its local copy; the credential never enters the agent's process environment, shell history, or any user-visible string.
+4. `ScanMetadata(ctx, title, body, commitMessages)` runs the Plan 06 built-in secret scanner over every human-visible PR field (title, body, branch name, each commit message) and returns a `scanners.ScanResult`. The broker does not decide whether findings block submission; the CLI inspects `Finding.BlocksExport` and refuses `CreateDraftPR` when a blocking finding is present.
+5. `CreateDraftPR(ctx, token, title, body)` opens the draft PR via the GitHub REST API and returns a `PRResult` (Number, URL, Draft, CreatedAt). The broker requires the title and body to be the sanitized, broker-generated values; it never echoes the raw agent transcript.
+6. `RevokeToken(token)` returns the credential to its issuer (DELETE on `/installation/token` for a GitHub App token, no-op at the issuer for a PAT) and zeroes the in-memory copy via `TokenHolder.Forget`. Revocation is best-effort: a failed issuer call is logged as a warning, but the local scrub still runs and the credential expires naturally at `IssuedAt + TTL`. `ai-env destroy` re-invokes `RevokeToken` so a credential that survived a crashed `ai-env pr` is still torn down.
+
+`Prepare` returns one of the package's sentinel errors (`ErrInvalidBranchPrefix`, `ErrProtectedBranch`, `ErrProtectedPath`, `ErrRepoUnconfigured`) on a policy refusal; `Materialize` / `PushBranch` / `CreateDraftPR` return `ErrTokenExpired` or `ErrTokenRevoked` when the supplied handle is no longer valid. The CLI matches against these with `errors.Is` so the operator-visible message is precise.
+
+### Authentication
+
+`auth.go` defines a narrow `TokenSource` interface (`Kind`, `Acquire`) with two implementations:
+
+- `GitHubAppSource` is the primary credential path. `NewGitHubAppSource` parses the App's PEM-encoded RSA private key (PKCS#1 or PKCS#8) once, and every `Acquire` call signs a fresh App JWT (`alg: RS256`, `iat: now-60s`, `exp: now+9min`, `iss: AppID`) using only `crypto/rsa` and `encoding/base64` (no third-party JWT or GitHub SDK dependency). The JWT is exchanged at `POST /app/installations/<id>/access_tokens` for an installation token; the response's `expires_at` becomes the holder's TTL (clamped by `ClampTTL`). Revocation is `DELETE /installation/token` authenticated with the installation token itself; a 401 response is treated as a no-op so the idempotent revoke path stays clean.
+- `PATSource` is the development fallback. Construction requires `PATConfig.Enabled=true` and a non-empty `Token`; the source copies the token into a `[]byte` so `Forget` can zero it in place. Revocation is a no-op at the issuer (the legacy authorizations endpoint is gone and fine-grained PATs are not deletable by an API token), but `TokenHolder.Revoke` still scrubs the local copy.
+
+`SelectTokenSource(SelectorConfig)` picks the path: if `App` is non-nil, `NewGitHubAppSource` runs and any error bubbles up so a misconfigured App never silently degrades to PAT; otherwise the PAT fallback is consulted; otherwise `ErrNoTokenSource` is returned and the CLI tells the operator to configure one path or the other.
+
+### Token lifecycle
+
+`token.go` owns the in-memory store. `TokenHolder` maps a `BrokerToken.Handle` (a 16-byte hex string from `crypto/rand`) to a `tokenSlot` carrying the raw secret as a `[]byte` so `Revoke` and `Forget` can overwrite it in place; `string` would leave the backing bytes around for an indeterminate time. The lifecycle constants are policy-fixed:
+
+- `DefaultTokenTTL = 300s` (the broker's default request to an issuer).
+- `MaxTokenTTL = 1800s` (the ceiling; `ClampTTL` caps any longer request).
+- `MinTokenTTL = 60s` (the floor; requests below it are rounded up so the holder never returns an already-expired handle).
+
+`Issue` records the credential and returns a `BrokerToken` carrying only Kind / Handle / IssuedAt / TTL (the raw secret is not on the value). `Materialize` returns a fresh copy of the bytes for a single HTTP / git request and returns `ErrTokenExpired` or `ErrTokenRevoked` for a stale handle. `Revoke` invokes the issuer-side callback (if any), zeroes the slot, and marks it revoked; the mutex is dropped across the network round trip so a slow issuer does not block other callers. `Forget` drops the slot entirely; `ForgetAll` is the deferred cleanup the broker runs so a panic between `AcquireToken` and the run finalizer still scrubs the credential. `Inspect` returns a `TokenStatus` snapshot (Kind, IssuedAt, TTL, ExpiresAt, Revoked, Expired) the run lifecycle marshals into `run.json`'s `broker.token` block; the raw secret is never returned.
+
+### PR body generation
+
+`body.go`'s `BuildPRBody(BodyInput)` is the canonical PR body builder. The body is rendered from the sanitized `run.Record` (run ID, agent, task summary), the scan results (count and highest severity), the `export.GateResult` (protected-path warnings), and the workspace diff (top-N changed-file list), plus an explicit "this PR was created by an automated agent" notice. The builder never copies the raw agent transcript into the body and never includes a value that matches a secret pattern; the CLI hands the resulting body to `ScanMetadata` as a defence-in-depth check before `CreateDraftPR` is allowed to run.
+
+### Log redaction
+
+`redact.go` implements the "raw token never appears in a log line" guarantee. `RedactTokens(s)` rewrites recognizable GitHub token shapes (`ghp_*`, `gho_*`, `ghu_*`, `ghs_*`, `ghr_*`, `github_pat_*`, App JWT-shaped triples, the `x-access-token:<secret>` URL form, and `Authorization: token <secret>` headers) to `[REDACTED]` and is the pure-function backstop callers use before constructing any log line, error message, or `PolicyDecisionEvent.Error` string. `NewRedactingLogger(inner Logger)` wraps a `Logger` interface so every line the broker emits passes through the redactor; `NewRedactingWriter(io.Writer)` adapts the same primitive to an `io.Writer` (line-buffered, flushed on `\n`) for stderr / stdout sinks where a logger interface would be overkill. The redactor is the second line of defence behind the "no raw bytes on `BrokerToken`" rule: even if a future code path accidentally formats a raw token into a string, the redactor scrubs it before the bytes leave the process.
+
+## Policy decisions
+
+`policy-decisions.jsonl` is the per-run append-only audit log every export-gate verdict and broker lifecycle stage lands in. The writer in `internal/run/policy_decisions.go` (`PolicyDecisionsWriter`) mirrors the lifecycle and network event writers: one JSON object per line, fsync after every write, mutex-serialized so concurrent emitters cannot interleave bytes. Each event carries the run ID, an RFC3339 timestamp, an `event` verb (`export_gate` or `broker_action`), a `decision` (`allow`, `block`, or `fail`), the env name, and the per-event payload fields (gate reasons, broker action name, branch, repo, token kind, PR number, PR URL, error string).
+
+The CLI emits events at six points during `ai-env pr` and one point during `ai-env patch`:
+
+- `export_gate` (verb): `ai-env patch` and `ai-env pr` both record their gate verdict here. Surface is `patch` or `pr`. `BlockingReasons` are folded into the `reasons` field; warnings are surfaced to the operator via the CLI but are not persisted (the file stays focused on decisions).
+- `broker_action` (verb), one per lifecycle stage. Action names mirror the lifecycle: `broker_prepare`, `broker_acquire_token`, `broker_push_branch`, `broker_scan_metadata`, `broker_create_pr`, `broker_revoke_token`. `decision` is `allow` when the stage proceeded, `block` when a sentinel error refused it on policy grounds (branch prefix, protected branch, protected path, token expired, token revoked, blocking metadata finding), or `fail` when the stage errored at the infrastructure level (network failure, missing credential, API 5xx). The `block` vs. `fail` split is the load-bearing distinction for an operator: `block` means "fix your inputs", `fail` means "retry or check connectivity".
+
+Token-bearing fields (today only the `error` string can echo a header) pass through `githubbroker.RedactTokens` at the emission site before the event is constructed; the writer does not re-redact. `ReadPolicyDecisions(runDir)` is the helper that loads the whole file in order; the file is small in practice (one gate decision plus a handful of broker outcomes per run), so the whole-file read is preferable to a streaming parser. The file is created up front as an empty placeholder by `CreateRunDirectory`, so a run that never reached the broker (a `ai-env patch` invocation or an `ai-env pr` that the gate blocked) still produces a well-formed JSONL file with the gate verdict and nothing else.
+
 ## Final summary
 
 The supervisor writes `.ai-env/runs/<run-id>/final-summary.md` from `finalizeTerminal` after the closing `run.json` snapshot and the partial-diff collection. The file is atomic (temp + rename) and idempotent (a re-run of the finalize step overwrites it with the latest snapshot). It contains:
@@ -484,7 +542,8 @@ ai-env/
                               # BackendAdapter / NetworkPolicyAdapter / ScanHook seams),
                               # signal handling, finalizer, partial-diff collection,
                               # --continue helper, network-events.jsonl writer, network
-                              # summary, final-summary.md, scan-hook driver
+                              # summary, final-summary.md, scan-hook driver,
+                              # policy-decisions.jsonl writer (plan 07)
   internal/network/           # Canonical runtime NetworkPolicy + NetworkPolicyAdapter interface,
                               # always-blocked CIDR / host slices, Validate, ToBackendPolicy
   internal/backend/           # Backend interface and supporting types
@@ -504,6 +563,11 @@ ai-env/
                               # discovery, gitleaks adapter
   internal/export/            # ExportGate (hard + configurable blockers,
                               # ModePatch / ModePR, GateResult)
+  internal/githubbroker/      # GitHubBroker interface, branch / protected-branch /
+                              # path-gate validation, PR metadata scanning, broker-
+                              # generated PR body, GitHub App + PAT TokenSource,
+                              # TokenHolder (TTL clamping, revocation), token / log
+                              # redaction (plan 07)
   .github/workflows/          # CI pipeline
   plan.md                     # Current plan in progress
   plans/                      # Historical planning artifacts
