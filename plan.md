@@ -63,7 +63,7 @@ servers:
    - Load and validate `mcp.yaml`.
    - Deny unknown servers by default.
    - Match server by name and validate version or digest.
-2. Implement schema hash pinning:
+2. [x] Implement schema hash pinning:
    - Compute hash of server tool schema on first registration.
    - Compare on each launch.
    - Warn or block if schema changed.
