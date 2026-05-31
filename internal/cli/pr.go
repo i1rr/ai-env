@@ -1,12 +1,14 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
 
 	"github.com/rivan1986/ai-env/internal/export"
 	"github.com/rivan1986/ai-env/internal/githubbroker"
+	"github.com/rivan1986/ai-env/internal/run"
 	"github.com/rivan1986/ai-env/internal/scanners"
 	"github.com/rivan1986/ai-env/internal/workspace"
 )
@@ -137,6 +139,23 @@ func RunPR(opts PROptions) error {
 		return fmt.Errorf("ai-env pr: %w", err)
 	}
 
+	// Plan 07 step 12: open the per-run policy-decisions writer so
+	// every gate verdict and broker stage outcome lands in
+	// policy-decisions.jsonl. The writer is run-scoped, so we only
+	// open it when a run directory has been located (loadExportInputs
+	// populates inputs.RunPath on success). An ad-hoc export off a
+	// workspace that has never been run carries no run dir; the
+	// decisions are still rendered to the operator via the CLI but
+	// have no on-disk home, so the writer stays nil.
+	pdw := openPolicyDecisionsWriter(inputs.RunPath, inputs.RunID, opts.Stderr)
+	if pdw != nil {
+		defer func() {
+			if closeErr := pdw.Close(); closeErr != nil {
+				fmt.Fprintf(opts.Stderr, "ai-env pr: warning: close policy decisions log: %v\n", closeErr)
+			}
+		}()
+	}
+
 	// Plan 07 step 11: the ExportGate runs before any broker action.
 	// The gate decides whether the diff is shippable; the broker only
 	// learns the answer indirectly (it is constructed and invoked only
@@ -151,6 +170,12 @@ func RunPR(opts PROptions) error {
 		Policy:          inputs.Policy,
 		Record:          inputs.Record,
 	})
+
+	// Plan 07 step 12: record the gate verdict regardless of whether
+	// it allowed or blocked. A blocked verdict is the explicit reason
+	// the broker never ran; recording it makes the on-disk file the
+	// single audit trail for "why did this run not produce a PR".
+	emitPolicyDecision(pdw, gateDecisionEvent("pr", opts.EnvName, verdict), opts.Stderr)
 
 	if verdict.Blocked() {
 		renderGateResult(opts.Stdout, opts.Stderr, "ai-env pr", verdict)
@@ -170,7 +195,7 @@ func RunPR(opts PROptions) error {
 		return nil
 	}
 
-	return runBrokerLifecycle(opts, inputs.Diff)
+	return runBrokerLifecycle(opts, inputs.Diff, pdw)
 }
 
 // runBrokerLifecycle executes the broker's Prepare/Acquire/Push/Scan/
@@ -185,16 +210,33 @@ func RunPR(opts PROptions) error {
 // from that point any return path must run RevokeToken (via defer) so
 // the credential is scrubbed even when PushBranch or CreateDraftPR
 // errors out.
-func runBrokerLifecycle(opts PROptions, diff workspace.DiffResult) error {
+func runBrokerLifecycle(opts PROptions, diff workspace.DiffResult, pdw *run.PolicyDecisionsWriter) error {
 	branch := workspace.BranchName(opts.EnvName)
 
 	ctx, err := opts.Broker.Prepare(opts.EnvName, branch, opts.Repo)
 	if err != nil {
+		// Plan 07 step 12: Prepare validates branch prefix and
+		// protected paths. Distinguish a policy refusal (which
+		// surfaces as one of the broker's sentinel errors) from an
+		// infrastructure failure so the on-disk record reflects the
+		// right verdict.
+		emitPolicyDecision(pdw, brokerActionEvent(
+			run.PolicyActionBrokerPrepare,
+			classifyBrokerErr(err),
+			opts.EnvName, branch, opts.Repo.Owner, opts.Repo.Name,
+			err.Error(), nil,
+		), opts.Stderr)
 		return fmt.Errorf("ai-env pr: broker prepare: %w", err)
 	}
 
 	token, err := opts.Broker.AcquireToken(ctx)
 	if err != nil {
+		emitPolicyDecision(pdw, brokerActionEvent(
+			run.PolicyActionBrokerAcquireToken,
+			run.PolicyDecisionFail,
+			opts.EnvName, branch, opts.Repo.Owner, opts.Repo.Name,
+			err.Error(), nil,
+		), opts.Stderr)
 		return fmt.Errorf("ai-env pr: broker acquire token: %w", err)
 	}
 	// Always attempt revocation. The plan documents this as "attempt
@@ -204,10 +246,31 @@ func runBrokerLifecycle(opts PROptions, diff workspace.DiffResult) error {
 	defer func() {
 		if revokeErr := opts.Broker.RevokeToken(token); revokeErr != nil {
 			fmt.Fprintf(opts.Stderr, "ai-env pr: warning: revoke token: %v\n", revokeErr)
+			emitPolicyDecision(pdw, brokerActionEvent(
+				run.PolicyActionBrokerRevokeToken,
+				run.PolicyDecisionFail,
+				opts.EnvName, branch, opts.Repo.Owner, opts.Repo.Name,
+				revokeErr.Error(), nil,
+			), opts.Stderr)
+			return
 		}
+		revokeEvt := brokerActionEvent(
+			run.PolicyActionBrokerRevokeToken,
+			run.PolicyDecisionAllow,
+			opts.EnvName, branch, opts.Repo.Owner, opts.Repo.Name,
+			"", nil,
+		)
+		revokeEvt.TokenKind = string(token.Kind)
+		emitPolicyDecision(pdw, revokeEvt, opts.Stderr)
 	}()
 
 	if err := opts.Broker.PushBranch(ctx, token); err != nil {
+		emitPolicyDecision(pdw, brokerActionEvent(
+			run.PolicyActionBrokerPushBranch,
+			classifyBrokerErr(err),
+			opts.EnvName, branch, opts.Repo.Owner, opts.Repo.Name,
+			err.Error(), nil,
+		), opts.Stderr)
 		return fmt.Errorf("ai-env pr: broker push branch: %w", err)
 	}
 
@@ -217,20 +280,103 @@ func runBrokerLifecycle(opts PROptions, diff workspace.DiffResult) error {
 	// to call CreateDraftPR when one is present.
 	scan, err := opts.Broker.ScanMetadata(ctx, opts.PRTitle, opts.PRBody, opts.CommitMessages)
 	if err != nil {
+		emitPolicyDecision(pdw, brokerActionEvent(
+			run.PolicyActionBrokerScanMetadata,
+			run.PolicyDecisionFail,
+			opts.EnvName, branch, opts.Repo.Owner, opts.Repo.Name,
+			err.Error(), nil,
+		), opts.Stderr)
 		return fmt.Errorf("ai-env pr: broker scan metadata: %w", err)
 	}
 	if blockers := blockingMetadataFindings(scan); len(blockers) > 0 {
 		renderMetadataBlockers(opts.Stderr, blockers)
+		emitPolicyDecision(pdw, brokerMetadataScanBlockEvent(
+			opts.EnvName, branch, opts.Repo.Owner, opts.Repo.Name,
+			blockers, token.Kind,
+		), opts.Stderr)
 		return fmt.Errorf("ai-env pr: PR metadata scan found %d blocking finding(s); submission refused", len(blockers))
 	}
 
 	pr, err := opts.Broker.CreateDraftPR(ctx, token, opts.PRTitle, opts.PRBody)
 	if err != nil {
+		emitPolicyDecision(pdw, brokerActionEvent(
+			run.PolicyActionBrokerCreatePR,
+			run.PolicyDecisionFail,
+			opts.EnvName, branch, opts.Repo.Owner, opts.Repo.Name,
+			err.Error(), nil,
+		), opts.Stderr)
 		return fmt.Errorf("ai-env pr: broker create draft PR: %w", err)
 	}
 
+	emitPolicyDecision(pdw, brokerCreatePREvent(
+		opts.EnvName, branch, opts.Repo.Owner, opts.Repo.Name,
+		pr, token.Kind,
+	), opts.Stderr)
+
 	renderPRResult(opts.Stdout, pr, opts.Draft)
 	return nil
+}
+
+// classifyBrokerErr maps a broker-returned error to the decision string
+// recorded on a policy decision event. A wrap of one of the broker's
+// sentinel errors (branch prefix, protected branch, protected path,
+// token expired, token revoked) is a policy refusal ("block"); any
+// other error is treated as an infrastructure failure ("fail").
+//
+// This distinction matters to an operator reading
+// policy-decisions.jsonl: a "block" means "your inputs violated a
+// policy rule; fix the inputs" while a "fail" means "the broker could
+// not complete the request; retry or check connectivity".
+func classifyBrokerErr(err error) string {
+	if err == nil {
+		return run.PolicyDecisionAllow
+	}
+	switch {
+	case errors.Is(err, githubbroker.ErrInvalidBranchPrefix),
+		errors.Is(err, githubbroker.ErrProtectedBranch),
+		errors.Is(err, githubbroker.ErrProtectedPath),
+		errors.Is(err, githubbroker.ErrTokenExpired),
+		errors.Is(err, githubbroker.ErrTokenRevoked):
+		return run.PolicyDecisionBlock
+	}
+	return run.PolicyDecisionFail
+}
+
+// openPolicyDecisionsWriter constructs a run.PolicyDecisionsWriter for
+// the given run dir, or returns nil when no run dir is available. A nil
+// writer is a no-op at every call site (emitPolicyDecision below
+// tolerates it) so the CLI can run uniformly on an ad-hoc workspace
+// that has never been through the supervisor.
+//
+// Errors from the underlying file open are surfaced as a warning on
+// stderr rather than aborting the export: the gate verdict is the
+// load-bearing output of `ai-env pr`, and losing the on-disk log
+// should not block the user from learning whether their PR shipped.
+func openPolicyDecisionsWriter(runPath, runID string, stderr io.Writer) *run.PolicyDecisionsWriter {
+	if runPath == "" || runID == "" {
+		return nil
+	}
+	w, err := run.OpenPolicyDecisionsWriter(runPath, run.PolicyDecisionsWriterOptions{
+		RunID: runID,
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "ai-env pr: warning: open policy decisions log: %v\n", err)
+		return nil
+	}
+	return w
+}
+
+// emitPolicyDecision writes evt to pdw, tolerating a nil writer (no-op)
+// and surfacing a write error as a stderr warning. The export path
+// must not abort because the audit log dropped an event; the warning
+// makes the failure visible without breaking the user's flow.
+func emitPolicyDecision(pdw *run.PolicyDecisionsWriter, evt run.PolicyDecisionEvent, stderr io.Writer) {
+	if pdw == nil {
+		return
+	}
+	if err := pdw.Write(evt); err != nil {
+		fmt.Fprintf(stderr, "ai-env pr: warning: write policy decision: %v\n", err)
+	}
 }
 
 // blockingMetadataFindings filters a ScanResult to the findings that
