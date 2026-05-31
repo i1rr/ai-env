@@ -45,6 +45,7 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(newAgentsCmd())
 	root.AddCommand(newScanCmd())
 	root.AddCommand(newPolicyCmd())
+	root.AddCommand(newDestroyCmd())
 
 	return root
 }
@@ -589,4 +590,38 @@ func newLogsCmd() *cobra.Command {
 	cmd.Flags().String("stream", "both", "Which stream to print: stdout, stderr, or both")
 	cmd.Flags().Bool("follow", false, "Keep tailing the log file(s) until the run reaches a terminal state")
 	return cmd
+}
+
+// newDestroyCmd builds the `ai-env destroy <env-name>` subcommand. Flag
+// parsing happens here; the actual reclamation logic lives in
+// internal/cli so it can be tested without involving Cobra.
+//
+// Destroy is the inverse of `ai-env new`: it removes the workspace
+// directory under .ai-env/workspaces/<env-name>/, the read-only baseline
+// snapshot under .ai-env/baselines/<env-name>/ (copy strategy only),
+// and the per-env worktree branch ai-env/<env-name> from the source
+// repo (worktree strategy only). Running it twice is a no-op: the
+// second run prints an "already absent" notice on stderr and exits 0
+// so the command is safe to put in cleanup scripts.
+func newDestroyCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "destroy <env-name>",
+		Short: "Remove an ai-env environment's on-disk resources",
+		Long: "Remove an ai-env environment's on-disk resources. The " +
+			"workspace directory under .ai-env/workspaces/<env-name>/ is " +
+			"reclaimed in every case; for copy-strategy envs the " +
+			"read-only baseline at .ai-env/baselines/<env-name>/ is also " +
+			"reclaimed, and for worktree-strategy envs the per-env " +
+			"branch ai-env/<env-name> is deleted from the source repo. " +
+			"Running destroy twice is a no-op: the second invocation " +
+			"prints an 'already absent' notice and exits 0.",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return cli.RunDestroy(cli.DestroyOptions{
+				EnvName: args[0],
+				Stdout:  cmd.OutOrStdout(),
+				Stderr:  cmd.ErrOrStderr(),
+			})
+		},
+	}
 }
