@@ -52,6 +52,25 @@ const (
 	// surfaced a high-confidence secret) carries the reason on the
 	// Reasons field.
 	PolicyDecisionBrokerAction = "broker_action"
+
+	// PolicyDecisionEngineEvaluate is the verb recorded for every
+	// PolicyDecision produced by the Plan 08 PolicyEngine.Evaluate
+	// call. The Action / Target / EventType / Reason / Metadata fields
+	// are the engine's own Event/PolicyDecision projection; Decision
+	// carries the engine verdict ("allow" / "ask" / "deny" /
+	// "quarantine" / "warn"); PolicyEventID carries the engine's
+	// unique "evt_<ts>_<hex>" identifier so `ai-env policy explain`
+	// can look the record up by ID.
+	//
+	// The engine verb is distinct from PolicyDecisionExportGate and
+	// PolicyDecisionBrokerAction because the engine is the global
+	// decision point; the gate and broker verbs predate the engine
+	// (plan 07) and remain in use so an operator reading an old run
+	// directory still sees the surface that emitted each record. Once
+	// the engine is wired into the export and broker surfaces (plan 08
+	// step 7), every gate / broker decision is also mirrored as an
+	// engine_evaluate record so the on-disk trail is uniform.
+	PolicyDecisionEngineEvaluate = "engine_evaluate"
 )
 
 // Policy-decision decision values. Mirrors export.Decision plus a "fail"
@@ -73,6 +92,36 @@ const (
 	// returned 5xx). Distinguished from "block" so an operator can
 	// tell a policy refusal from a transient outage.
 	PolicyDecisionFail = "fail"
+
+	// PolicyDecisionDeny mirrors the policy engine's DecisionDeny
+	// verdict on engine_evaluate records. Distinct from
+	// PolicyDecisionBlock (which is the export gate / broker stage
+	// verb) so a consumer can tell a generic engine refusal from a
+	// gate-side refusal in a single grep. The two values agree
+	// semantically (action is refused); the on-disk distinction is
+	// purely a provenance marker.
+	PolicyDecisionDeny = "deny"
+
+	// PolicyDecisionAsk mirrors the policy engine's DecisionAsk
+	// verdict: the action requires user or reviewer approval before
+	// proceeding. v0.1 surfaces this verdict to the CLI which prompts
+	// the operator; an autonomous run treats it as a soft block. Only
+	// recorded on engine_evaluate events.
+	PolicyDecisionAsk = "ask"
+
+	// PolicyDecisionQuarantine mirrors the policy engine's
+	// DecisionQuarantine verdict: the run must stop and preserve its
+	// artifacts for inspection. Only recorded on engine_evaluate
+	// events.
+	PolicyDecisionQuarantine = "quarantine"
+
+	// PolicyDecisionWarn mirrors the policy engine's DecisionWarn
+	// verdict: the action proceeds but is highlighted in the run
+	// report. Recorded on engine_evaluate events; the broker also
+	// uses the warn-class internally but surfaces it via the
+	// PolicyDecisionFail string (so the broker's transient-error
+	// distinction stays visible).
+	PolicyDecisionWarn = "warn"
 )
 
 // Broker action names recorded on PolicyDecisionBrokerAction events.
@@ -204,6 +253,48 @@ type PolicyDecisionEvent struct {
 	// CreateDraftPR. Empty / omitted on every other event. The URL is
 	// not a credential and is not redacted.
 	PRURL string `json:"pr_url,omitempty"`
+
+	// PolicyEventID is the policy engine's unique
+	// "evt_<timestamp>_<hex>" identifier for an engine_evaluate event.
+	// Plan 08's `ai-env policy explain --event <id>` looks decisions
+	// up by this field, so the writer never overwrites a non-empty
+	// value supplied by the caller (in contrast to RunID and
+	// Timestamp, which the writer pins for provenance). Empty /
+	// omitted on gate and broker-action events.
+	PolicyEventID string `json:"policy_event_id,omitempty"`
+
+	// EventType is the policy engine's Event family identifier on an
+	// engine_evaluate record (one of policy.EventEnvironmentCreate,
+	// EventExport, EventBrokerAction, EventShellCommand). Empty /
+	// omitted on gate and broker-action events because their Event
+	// verb already encodes the family.
+	EventType string `json:"event_type,omitempty"`
+
+	// Target identifies the resource the policy engine evaluated
+	// against (env name for environment_create, branch for export,
+	// "owner/repo:branch" for broker_action, command line for
+	// shell_command). Empty / omitted on gate and broker-action
+	// records (those carry the same context on Branch / Repo). The
+	// target is informational only; the engine's decision logic does
+	// not switch on it after evaluation.
+	Target string `json:"target,omitempty"`
+
+	// Reason is the policy engine's human-readable explanation for an
+	// engine_evaluate verdict. It is the string `ai-env policy
+	// explain` prints verbatim. Distinct from Reasons (which is a
+	// per-blocker list on gate events) so a JSON consumer can pick
+	// the engine's single-line reason without joining with Reasons.
+	// Empty / omitted on gate and broker-action records.
+	Reason string `json:"reason,omitempty"`
+
+	// Metadata is the policy engine's per-decision context map
+	// (workspace_strategy, gate_decision, outcome, etc.). Surfaced on
+	// the on-disk record so an auditor reading
+	// policy-decisions.jsonl sees the same context the engine
+	// evaluated against. Empty / omitted on gate and broker-action
+	// records, and on engine_evaluate records that carried no
+	// metadata.
+	Metadata map[string]string `json:"metadata,omitempty"`
 }
 
 // PolicyDecisionsWriter appends PolicyDecisionEvent records to
@@ -378,6 +469,136 @@ func (w *PolicyDecisionsWriter) Write(evt PolicyDecisionEvent) error {
 		return fmt.Errorf("run: sync policy decisions log: %w", err)
 	}
 	return nil
+}
+
+// EngineDecision is the writer-facing projection of a policy engine
+// PolicyDecision. The shape carries every field the engine produces,
+// expressed in primitives (no policy package dependency) so the run
+// package does not import internal/policy. Callers that hold a
+// policy.PolicyDecision build an EngineDecision at the call site (the
+// CLI and the future run-startup wiring do this) and pass it through
+// WriteEngineDecision.
+//
+// The inversion (writer owns the on-disk shape; engine owns the
+// in-memory shape; caller bridges) is deliberate: it keeps the
+// internal/run package free of policy semantics and the
+// internal/policy package free of file I/O, which matches the
+// fail-closed / pure-evaluator rules documented on
+// policy.PolicyEngine.
+type EngineDecision struct {
+	// EventID is the engine's "evt_<ts>_<hex>" identifier. Copied
+	// verbatim onto the on-disk record's PolicyEventID field.
+	// Required: an engine decision without an EventID cannot be
+	// looked up by `ai-env policy explain --event <id>` and is
+	// rejected by WriteEngineDecision.
+	EventID string
+
+	// Decision is the engine verdict string ("allow" / "ask" /
+	// "deny" / "quarantine" / "warn"). Required. WriteEngineDecision
+	// does not normalize: the caller is responsible for converting
+	// policy.Decision (a typed string) to its underlying value with
+	// string(dec.Type).
+	Decision string
+
+	// Reason is the engine's human-readable explanation. Required so
+	// the on-disk record is informative without joining against the
+	// engine source code; an empty Reason is rejected.
+	Reason string
+
+	// EventType is the engine Event family identifier
+	// (policy.EventType cast to string). Optional but recommended;
+	// the on-disk explain command groups records by this field.
+	EventType string
+
+	// Action mirrors policy.Event.Action ("create", "patch", "pr",
+	// "broker_push_branch", "exec", ...). Optional; omitted records
+	// still parse but lose the verb context.
+	Action string
+
+	// Target mirrors policy.Event.Target. Optional; omitted records
+	// still parse.
+	Target string
+
+	// EnvName is the ai-env environment the decision applies to.
+	// Optional; supplied at the call site (the engine itself is
+	// environment-agnostic) so an operator can filter the on-disk
+	// trail by env without joining against run.json.
+	EnvName string
+
+	// Metadata is the engine decision's metadata map. Optional. The
+	// writer takes a shallow copy at Write time so a caller that
+	// reuses the map for the next event does not leak across
+	// records.
+	Metadata map[string]string
+}
+
+// WriteEngineDecision appends one engine_evaluate event recording the
+// policy engine's verdict for one Event. The method exists alongside
+// Write so engine-produced decisions get a stable, dedicated entry
+// point: callers that hold a policy.PolicyDecision do not have to
+// learn the PolicyDecisionEvent envelope's field-by-field mapping
+// (PolicyEventID vs EventID, Reason vs Reasons) and the writer can
+// stamp the engine_evaluate verb and the writer-pinned fields in one
+// place.
+//
+// Validation:
+//
+//   - dec.EventID must be non-empty so `ai-env policy explain` can
+//     look the record up by ID.
+//   - dec.Decision must be non-empty so the verdict is recoverable
+//     from the on-disk record.
+//   - dec.Reason must be non-empty so the explain output is
+//     informative.
+//
+// The RunID and Timestamp fields are filled in from the writer's
+// stored metadata; the caller cannot override them (matching Write's
+// existing behaviour). The Metadata map is shallow-copied so a caller
+// that mutates the map after WriteEngineDecision returns does not
+// retroactively alter the on-disk record's structural contents (the
+// JSON encoding is already finalized, but defending the in-memory
+// shape removes a subtle pitfall).
+//
+// WriteEngineDecision is safe for concurrent use; it serializes
+// through the same mutex as Write.
+func (w *PolicyDecisionsWriter) WriteEngineDecision(dec EngineDecision) error {
+	if dec.EventID == "" {
+		return errors.New("run: engine decision requires EventID")
+	}
+	if dec.Decision == "" {
+		return errors.New("run: engine decision requires Decision")
+	}
+	if dec.Reason == "" {
+		return errors.New("run: engine decision requires Reason")
+	}
+
+	evt := PolicyDecisionEvent{
+		Event:         PolicyDecisionEngineEvaluate,
+		EnvName:       dec.EnvName,
+		Decision:      dec.Decision,
+		Action:        dec.Action,
+		PolicyEventID: dec.EventID,
+		EventType:     dec.EventType,
+		Target:        dec.Target,
+		Reason:        dec.Reason,
+		Metadata:      copyDecisionMetadata(dec.Metadata),
+	}
+	return w.Write(evt)
+}
+
+// copyDecisionMetadata returns a shallow copy of in. Mirrors the
+// engine's own copyMetadata helper; duplicated here so the run
+// package does not import internal/policy just for one helper.
+// A nil or empty map returns nil (rather than an empty allocated
+// map) so the on-disk record's omitempty produces a compact line.
+func copyDecisionMetadata(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }
 
 // Close closes the underlying policy-decisions.jsonl file. It is safe to
