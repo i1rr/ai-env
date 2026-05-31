@@ -1,8 +1,125 @@
 # ai-env
 
-`ai-env` is a Go CLI that scaffolds isolated sandbox environments for AI coding agents. It keeps each agent's work in its own workspace and configuration tree under `.ai-env/`, separate from your active working copy.
+`ai-env` is a Go CLI that scaffolds isolated sandbox environments for AI coding agents (Claude Code, Codex). Each environment lives under `.ai-env/` in your project: its own workspace, its own configuration, its own policy, its own run trail, all separate from your active working copy. The goal is to let an autonomous agent edit code, run commands, and reach the network on your behalf without trusting it with your shell, your repo's main branch, your SSH keys, your Docker socket, or arbitrary internet egress.
 
-This repository contains plans 01 through 07: project scaffolding, configuration loading and validation, workspace isolation via Git worktrees or directory copies, diff and patch export, protected path matching, the run-lifecycle supervisor (run IDs, run directory layout, lifecycle state machine, disk-streamed stdout/stderr capture, max-runtime and signal handling, partial-diff collection, and the `--continue` link), the Backend interface with a Docker Sandboxes (`sbx`) adapter, rootless Docker and Podman fallback backends, and an in-memory mock, agent launchers for Claude Code and Codex with version, flag, and credential probing, the `ai-env agents` family of subcommands, the canonical runtime `NetworkPolicy` plus `NetworkPolicyAdapter` interface with fail-closed supervisor wiring, a host-side provider proxy that fronts Anthropic / OpenAI traffic with redacted logs, per-run `network-events.jsonl`, the `ai-env report` subcommand, the per-run `final-summary.md` that includes the network section, the scanning and export-gate stack (built-in pattern-only secret scanner, warn-only entropy analyzer, gitleaks adapter, optional external scanner discovery, `ai-env scan` subcommand, and the `ExportGate` wired into `ai-env patch` and `ai-env pr`), and the GitHub broker that opens draft pull requests without leaking a raw token into the sandbox (branch-prefix and protected-branch enforcement, path-gate checks, PR-metadata secret scanning, broker-generated PR body, GitHub App installation token flow with PAT development fallback, in-memory token holder with TTL and revocation, log redaction of token-like strings, the `ai-env pr` broker wiring with the ExportGate running first, and per-stage `policy-decisions.jsonl` events).
+## Quickstart
+
+Build the binary, scaffold an environment for the current project, look at what was generated, and export the agent's changes back to your tree.
+
+```sh
+# 1. Build (Go 1.22+ required)
+go install github.com/rivan1986/ai-env/cmd/ai-env@latest
+
+# 2. From inside your project repo, create an environment named "demo"
+cd path/to/your/project
+ai-env new demo
+
+# 3. Inspect what was scaffolded under .ai-env/
+ai-env list
+ai-env policy check demo
+
+# 4. (Run the agent against the workspace -- see "First run" below)
+
+# 5. Review the agent's changes
+ai-env diff demo
+ai-env status demo
+ai-env logs demo
+
+# 6. Scan the workspace and export the changes as a patch
+ai-env scan demo
+ai-env patch demo --out demo.patch
+```
+
+The `.ai-env/` directory holds every environment's workspace, configs, policy, and run artifacts. Each environment also gets a per-run trail under `.ai-env/workspaces/<env-name>/.runs/<run-id>/` containing the captured stdout / stderr, partial diff, `network-events.jsonl`, `policy-decisions.jsonl`, and `final-summary.md`.
+
+## Install
+
+### From source (recommended)
+
+```sh
+go install github.com/rivan1986/ai-env/cmd/ai-env@latest
+```
+
+The binary lands in `$(go env GOBIN)` or `$(go env GOPATH)/bin`. Add that directory to your `PATH` if it is not there already.
+
+### Local build (development)
+
+```sh
+git clone https://github.com/rivan1986/ai-env.git
+cd ai-env
+go build -o ai-env ./cmd/ai-env
+./ai-env --help
+```
+
+Go 1.22 or newer is required (see `go.mod`). The binary is self-contained: there is no daemon and no system state outside the per-project `.ai-env/` directory.
+
+### Optional host tooling
+
+Most flows work with the Go binary alone. A few features become available when their host tools are installed and discoverable on `PATH`:
+
+- `docker` or `podman` for the reduced-isolation fallback backends. The primary `docker_sbx` adapter targets a Docker Sandboxes-compatible runtime.
+- `gitleaks` for the optional gitleaks scanner adapter. Missing scanners warn rather than crash; the built-in pattern scanner always runs.
+- `git` for environments scaffolded from Git repositories (workspaces are materialized via `git worktree`).
+
+## First run
+
+A first end-to-end run looks like this. The example uses `claude` as the agent; `codex` works the same way.
+
+```sh
+# In your project root
+ai-env new demo                       # scaffold .ai-env/ + workspace for "demo"
+ai-env policy init                    # write a conservative default policy.yaml (if missing)
+ai-env agents doctor                  # confirm the agent CLI is installed and credentialed
+
+# Once `ai-env run` is wired (later plan), the supervised run will look like:
+ai-env run demo --agent claude --task "fix the failing tests"
+
+# Review the result
+ai-env status demo                    # current/last run state
+ai-env logs   demo                    # captured stdout/stderr for the latest run
+ai-env diff   demo                    # baseline -> workspace diff
+ai-env report demo                    # human-readable run report (incl. network summary)
+
+# Export
+ai-env scan  demo                     # run secret + dependency scanners on the workspace
+ai-env patch demo --out demo.patch    # export the diff as a unified-diff patch (export-gated)
+ai-env pr    demo --draft             # open a brokered draft PR (export-gated, no raw token in sandbox)
+```
+
+Each command operates on the env's latest run by default. Pass `--run <id>` to pin one of the historical runs under `.ai-env/workspaces/demo/.runs/`.
+
+Note: the user-facing `ai-env run` and `ai-env destroy` subcommands wire the supervisor, backend, network adapter, provider proxy, and scan hook together end-to-end. The supervisor, backends, network policy adapters, scanners, export gate, and GitHub broker that those commands compose are already in tree (see the "Run lifecycle", "Backend abstraction", "Network policy enforcement", "Scanning", "Export gate", and "GitHub broker" sections below); the `run` / `destroy` Cobra wiring lands in a later plan.
+
+## Supported agents
+
+`ai-env` ships with launchers for the two AI coding agents below. The launcher detects the binary, probes its version, picks the right autonomous flag, and resolves how credentials should be supplied (host env var passthrough, file mount, or provider-proxy injection).
+
+| Agent       | CLI binary | Launcher package                  |
+| ----------- | ---------- | --------------------------------- |
+| Claude Code | `claude`   | `internal/agents/claude`          |
+| Codex       | `codex`    | `internal/agents/codex`           |
+
+Use `ai-env agents list` to see which launchers are registered and what versions are detected on this host, `ai-env agents doctor` to run health + credential checks for every registered agent, and `ai-env agents probe <agent>` to probe a single agent's version, autonomous flags, and `--help` output.
+
+Adding a new agent means writing a `Launcher` implementation in `internal/agents/<name>/` and registering it in `internal/cli/agents.go::LauncherFactory`. There is no plugin system; agents are first-class in the binary so the supervisor can enforce its contracts on every launch.
+
+## Security summary
+
+`ai-env`'s security model is **defense in depth, fail-closed**. The threat model assumes the AI agent is untrusted: it may be buggy, prompt-injected, or actively adversarial. The CLI's job is to give the agent enough room to do useful work while making it expensive or impossible to exfiltrate secrets, mutate the host, or push unreviewed code.
+
+The MVP enforces, at minimum:
+
+- **Workspace isolation.** Each env is materialized in its own directory under `.ai-env/workspaces/<env-name>/`, via `git worktree` for Git sources or a filtered copy for non-Git sources. The agent never sees your active working tree.
+- **Protected paths.** The supervisor refuses to scaffold or expose files matched by the project's protected-path patterns (SSH keys, cloud credentials, `.env`, etc.). The same patterns gate diff/patch export.
+- **Policy engine.** Every run consults `.ai-env/policy.yaml` for allowed network domains, denied command patterns, and per-env overrides. Decisions are written to `policy-decisions.jsonl` and recoverable via `ai-env policy explain`.
+- **Network policy, fail-closed.** The supervisor refuses to start a run if the configured network adapter rejects the policy. Egress is constrained to an explicit allow-list of provider domains; everything else is blocked at the backend level. A host-side provider proxy fronts Anthropic / OpenAI traffic with redacted logs so raw API keys never reach the sandbox.
+- **Backend sandbox.** The default backend is the Docker Sandboxes (`sbx`) runtime; rootless Docker and Podman are supported as reduced-isolation fallbacks, gated behind explicit `--accept-reduced-isolation` and `--unsafe-host-network` flags. The host Docker socket and SSH agent socket are never mounted into the sandbox.
+- **Optional shell shim.** With `--shell-shim`, the agent's `bash` / `sh` invocations are routed through a wrapper that logs each command, denies obvious high-risk patterns (curl-pipe-shell, SSH paths, cloud metadata IP), and consults the policy for the rest.
+- **Scanning + export gate.** `ai-env scan` runs a built-in pattern-only secret scanner (provider API keys, PEM headers, `.env` assignments), an entropy-only warn analyzer, and optional adapters (gitleaks, external scanners). The `ExportGate` blocks `ai-env patch` / `ai-env pr` on high-confidence secret findings; entropy-only findings warn but do not block.
+- **Brokered PRs.** `ai-env pr` opens draft pull requests via a host-side GitHub broker. The agent never sees a raw GitHub token: the broker holds the credential in an in-memory `TokenHolder` with TTL clamping and revocation, redacts token-like strings from logs, and enforces branch-prefix / protected-branch / path-gate / metadata-scan checks before opening the PR.
+- **Auditable run trail.** Every run produces `network-events.jsonl`, `policy-decisions.jsonl`, captured stdout/stderr, a partial diff, and a `final-summary.md`. `ai-env report` and `ai-env logs` surface them.
+
+Detailed treatments live under `docs/` (`threat-model.md`, `enforcement-boundaries.md`, `residual-risk.md`, `model-credentials.md`, `backends.md`, `unsafe-modes.md`). Read those before relying on `ai-env` for anything you would not run yourself in a coffee shop.
 
 ## Status
 
