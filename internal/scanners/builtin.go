@@ -524,6 +524,57 @@ func isBinary(b []byte) bool {
 	return false
 }
 
+// SecretPattern is the exported view of one built-in pattern entry.
+// External callers (the shim-helper's MCP-mode response scrubber, the
+// MCP gateway secret detector) iterate this slice rather than touching
+// the unexported patternRule type so the scanners package controls
+// the on-disk schema of every emitted Finding.
+//
+// Pattern is the compiled regex; Name is the human-readable label that
+// appears as Finding.Pattern in scan output. Kind is the Finding.Type
+// value the rule emits ("api_key", "private_key", "env_assignment",
+// "custom").
+type SecretPattern struct {
+	// Pattern is the compiled RE2 regular expression. Callers MUST NOT
+	// modify the returned regexp; it is a pointer to the same compiled
+	// value the scanner uses internally so a mutation would corrupt
+	// every scan in the process.
+	Pattern *regexp.Regexp
+
+	// Name is the human-readable label (e.g. "Anthropic sk-ant-
+	// prefix"). Stable across releases so log lines that include it
+	// stay grep-friendly.
+	Name string
+
+	// Kind is the Finding.Type the rule emits. One of "api_key",
+	// "private_key", "env_assignment". Used by the gateway secret
+	// detector to populate the LeakEvidence.Type field consistently.
+	Kind string
+}
+
+// BuiltInSecretPatterns returns the fixed set of built-in secret
+// patterns. The result is a freshly allocated slice so callers can
+// append to it without aliasing into the scanner's state; the
+// underlying *regexp.Regexp values are shared (see SecretPattern doc).
+//
+// Used by the MCP gateway secret detector (Plan Bucket 11) and by the
+// shim-helper's MCP-mode response scrubber (Plan Batch 0.3) to apply
+// the same redaction rules the workspace scanner enforces. The plan
+// pins this parity: "Gateway scans payloads via
+// scanners.builtinPatterns() in both directions".
+func BuiltInSecretPatterns() []SecretPattern {
+	rules := builtinPatterns()
+	out := make([]SecretPattern, 0, len(rules))
+	for _, r := range rules {
+		out = append(out, SecretPattern{
+			Pattern: r.re,
+			Name:    r.name,
+			Kind:    r.kind,
+		})
+	}
+	return out
+}
+
 // builtinPatterns returns the fixed set of high-confidence secret
 // patterns the v0.1 scanner ships with. Adding a pattern here means
 // committing to it blocking export by default; entries should match a

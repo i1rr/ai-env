@@ -121,7 +121,7 @@ All five per-subsystem streams stay as **source of truth**. `leaks.jsonl` is the
 - `internal/run/run.go`: append `"leaks.jsonl"` + `"transcript.jsonl"` to `runFileNames`. `CreateRunDirectory` ends with `chmod runDir 0700`. **Also**: scan `<runDir>` at supervisor start for stale `*.tmp.*` files; remove any older than the current run start time.
 - `internal/run/record.go`: add `SchemaVersions map[string]int` to the `Record`; supervisor populates at **step 1** (lifecycle open), not finalize.
 
-**Batch 0.3 — Shim helper subcommand**
+**Batch 0.3 — Shim helper subcommand** [x]
 - `cmd/ai-env/main.go` hidden `shim-helper {shell,mcp}`.
 - Shell mode: opens single `O_RDONLY \| O_NOFOLLOW` fd when interpreter-via-file rule triggers; scans content; if allow, `SYS_EXECVEAT(fd, ...)` (Linux) or `/dev/fd/<n>` (macOS).
 - Real-binary resolution: helper consults `<runDir>/ipc/orig/<prog>` (a bind-mount sourced from the image's actual binaries — supervisor captures via `docker cp` post-Start OR a precomputed per-image table at build time; fallback for unknown images: read the original binary from `/proc/<helper-pid>/root/usr/bin/<prog>` via `ns.Do` into a tmpfs). **Helper never uses `exec.LookPath`** for the real binary.

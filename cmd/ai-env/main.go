@@ -47,6 +47,7 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(newPolicyCmd())
 	root.AddCommand(newDestroyCmd())
 	root.AddCommand(newMCPCmd())
+	root.AddCommand(newShimHelperCmd())
 
 	return root
 }
