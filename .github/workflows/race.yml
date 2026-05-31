@@ -1,0 +1,50 @@
+name: Race detector
+
+# Stress the race detector against the concurrency-heavy packages.
+# The default CI job already runs `go test -race ./...` once; this
+# workflow targets the subset of packages that own goroutines,
+# channels, or shared state (supervisor, streams, policy engine,
+# secrets proxy, network broker, scanners, mock backend, shell shim)
+# and runs them multiple times with a tighter timeout so flaky
+# data races surface here rather than during release.
+#
+# Plan reference: plan.md "CI hardening" step 13
+# ("Add race detector CI job for selected packages.").
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  race:
+    name: Race detector (selected packages)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: go test -race (selected packages)
+        env:
+          # Keep the integration backend gate off here. This job
+          # exercises in-process concurrency, not real container
+          # backends (those run in the integration workflow).
+          AI_ENV_BACKEND_INTEGRATION: "0"
+        run: |
+          go test -race -count=3 -timeout=10m \
+            ./internal/run/... \
+            ./internal/policy/... \
+            ./internal/secrets/... \
+            ./internal/network/... \
+            ./internal/scanners/... \
+            ./internal/backend/mock/...

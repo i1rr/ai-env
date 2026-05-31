@@ -1,0 +1,53 @@
+name: Integration
+
+# Backend integration tests that touch real `sbx`, `docker`, or
+# `podman` binaries are gated by AI_ENV_BACKEND_INTEGRATION=1 so
+# the default `go test ./...` invocation skips them cleanly. This
+# workflow flips that gate on. Each gated test still calls
+# exec.LookPath() for the binary it needs and t.Skip's when the
+# host lacks it, so this job is best-effort: the gate enables
+# integration testing, it does not promise the runner has every
+# backend installed.
+#
+# Plan reference: plan.md "CI hardening" step 14
+# ("Add integration CI job gated by AI_ENV_BACKEND_INTEGRATION=1.").
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  integration:
+    name: Backend integration (AI_ENV_BACKEND_INTEGRATION=1)
+    runs-on: ubuntu-latest
+    env:
+      AI_ENV_BACKEND_INTEGRATION: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Show available backends
+        # Diagnostic only: a missing binary causes the corresponding
+        # gated test to Skip, not Fail, so we record what was present.
+        run: |
+          echo "docker:  $(command -v docker  || echo 'not installed')"
+          echo "podman:  $(command -v podman  || echo 'not installed')"
+          echo "sbx:     $(command -v sbx     || echo 'not installed')"
+
+      - name: go test (integration gate on)
+        run: |
+          go test -timeout=15m \
+            ./internal/backend/... \
+            ./internal/agents/...
