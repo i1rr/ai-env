@@ -16,6 +16,71 @@ import (
 // taskFileName so a single edit changes the layout everywhere.
 const runJSONFileName = "run.json"
 
+// Stream schema-version constants — Plan §0 "Schema-version contract".
+//
+// Existing per-subsystem streams (lifecycle.jsonl, network-events.jsonl,
+// shell-commands.jsonl, policy-decisions.jsonl, mcp-calls.jsonl) record
+// their schema version into the Record.SchemaVersions map written at
+// supervisor step 1, not via an in-record _schema_version tag. New
+// streams introduced in this plan (leaks.jsonl, transcript.jsonl,
+// filesystem-events.jsonl) carry an in-record `_schema_version: 1`
+// instead, owned by the per-stream writer.
+//
+// Bumping any of the constants below is a coordinated change: the writer
+// emits the new shape, the reader (status command, leaks aggregator,
+// audit tail) refuses Records carrying SchemaVersions[stream] greater
+// than the version it understands, and the operator runbook documents
+// the migration. v0.1 ships every existing stream at version 1.
+const (
+	// SchemaVersionLifecycle is the lifecycle.jsonl schema version.
+	// Bumped when the LifecycleEvent shape changes incompatibly
+	// (a renamed required field, a new required field, etc.).
+	SchemaVersionLifecycle = 1
+
+	// SchemaVersionNetworkEvents is the network-events.jsonl schema
+	// version. Bumped on incompatible changes to the per-record
+	// shape.
+	SchemaVersionNetworkEvents = 1
+
+	// SchemaVersionShellCommands is the shell-commands.jsonl schema
+	// version. Bumped on incompatible changes to the per-record
+	// shape.
+	SchemaVersionShellCommands = 1
+
+	// SchemaVersionPolicyDecisions is the policy-decisions.jsonl
+	// schema version. Bumped on incompatible changes to the
+	// per-record shape.
+	SchemaVersionPolicyDecisions = 1
+
+	// SchemaVersionMCPCalls is the mcp-calls.jsonl schema version.
+	// Bumped on incompatible changes to the per-record shape.
+	SchemaVersionMCPCalls = 1
+)
+
+// CurrentSchemaVersions returns the per-stream schema-version map the
+// supervisor writes into Record.SchemaVersions at every snapshot. The
+// map's keys are the canonical on-disk filenames (without the .jsonl
+// suffix) of every existing per-subsystem stream so a downstream
+// reader can grep by filename without translation.
+//
+// New streams introduced in this plan (leaks.jsonl, transcript.jsonl,
+// filesystem-events.jsonl) deliberately do NOT appear in this map:
+// they carry their own in-record `_schema_version` field instead per
+// the Plan §0 contract. Adding them here would surface a duplicate
+// source of truth a future bump could drift across.
+//
+// The returned map is a fresh copy on every call; callers may mutate
+// it without affecting subsequent calls or other writers.
+func CurrentSchemaVersions() map[string]int {
+	return map[string]int{
+		"lifecycle":         SchemaVersionLifecycle,
+		"network-events":    SchemaVersionNetworkEvents,
+		"shell-commands":    SchemaVersionShellCommands,
+		"policy-decisions":  SchemaVersionPolicyDecisions,
+		"mcp-calls":         SchemaVersionMCPCalls,
+	}
+}
+
 // runJSONTempPattern is the basename pattern handed to os.CreateTemp for
 // the staged write file. Keeping the prefix obvious ("run.json.tmp-")
 // makes a stale temp file from a crashed write trivially identifiable
@@ -188,6 +253,28 @@ type Record struct {
 	// null is the truthful encoding for a chain that has not started
 	// yet.
 	LinkedPreviousRun *string `json:"linked_previous_run"`
+
+	// SchemaVersions records the per-stream schema-version map for
+	// this run. The supervisor populates the map at canonical step 1
+	// (lifecycle open) — not at finalize — so mid-run readers (the
+	// status command, an audit tail, the leaks aggregator) see the
+	// map immediately rather than only after the run terminates.
+	//
+	// The Plan §0 "Schema-version contract" pins the map's role:
+	// every existing stream (lifecycle.jsonl, network-events.jsonl,
+	// shell-commands.jsonl, etc.) lands a per-stream key on this
+	// map; every new stream (leaks.jsonl, transcript.jsonl,
+	// filesystem-events.jsonl) carries an in-record _schema_version
+	// tag instead. A reader that finds a stream key here whose value
+	// is greater than the version it understands refuses to parse
+	// the stream and surfaces a clear error.
+	//
+	// A nil map serializes as JSON null per the plan's pointer/null
+	// discipline (the field stays present on disk so the schema
+	// shape is stable; readers see null until the supervisor's step
+	// 1 populates the keys). Encoded as "schema_versions" verbatim
+	// to match the plan's wording.
+	SchemaVersions map[string]int `json:"schema_versions"`
 }
 
 // WriteRecord serializes record into run.json under runDir using an

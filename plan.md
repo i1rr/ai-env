@@ -115,7 +115,7 @@ All five per-subsystem streams stay as **source of truth**. `leaks.jsonl` is the
 **Batch 0.1 — Lifecycle verbs + per-verb Metadata schema** [x]
 - Add constants (each with inline Metadata key table): `proxy_started/_stopped`, `gateway_started/_stopped/_secret_blocked/_secret_response`, `observer_started/_stopped/_unavailable`, `broker_started/_stopped/_unavailable`, `control_socket_started/_stopped`, `network_policy_degraded`, `secrets_permission_warning`, `shim_coverage_degraded`, `helper_rpc_aborted`, `transcript_parser_error`, `mcp_config_neutralized` (NEW — workspace-local config renamed).
 
-**Batch 0.2 — `leaks.jsonl` + broadened RedactSecrets**
+**Batch 0.2 — `leaks.jsonl` + broadened RedactSecrets** [x]
 - `internal/secrets/proxy.go`: extend `secretPatterns` to mirror `scanners.builtinPatterns()` (sk-ant, sk-, ghp_/gho_/ghs_/github_pat_, AKIA, GCP svc-acct JSON, Azure, Slack, Stripe, PEM, SSH key blobs, `PASSWORD=...`, npm).
 - `internal/run/leaks.go`: `LeakRecord` + `LeakEvidence` with `_schema_version: 1`. `LeaksWriter` opens `<runDir>/leaks.jsonl.tmp.<pid>.<rand>` with `O_WRONLY \| O_CREATE \| O_EXCL`; `Close()` does `fsync`, then `os.Rename` over `leaks.jsonl`. `Write` redacts every non-empty string field.
 - `internal/run/run.go`: append `"leaks.jsonl"` + `"transcript.jsonl"` to `runFileNames`. `CreateRunDirectory` ends with `chmod runDir 0700`. **Also**: scan `<runDir>` at supervisor start for stale `*.tmp.*` files; remove any older than the current run start time.

@@ -675,6 +675,22 @@ func NewSupervisor(opts SupervisorOptions) (*Supervisor, error) {
 		return nil, fmt.Errorf("run: NewSupervisor: %w", err)
 	}
 
+	// Plan §0.2 (Batch 0.2): sweep stale `leaks.jsonl.tmp.*` files
+	// from a previously crashed run before any per-run writer opens.
+	// A stale tmp would otherwise block OpenLeaksWriter's O_EXCL the
+	// first time the leaks aggregator (Batch 8.1) tries to stage a
+	// fresh write. We pass `now()` as the cutoff so a tmp the current
+	// process is about to create (impossible here — Open has not been
+	// called yet — but defensive against future re-entrant callers) is
+	// preserved. CleanupStaleLeaksTemp tolerates a missing runDir and
+	// per-entry errors; we surface the aggregate as a non-fatal
+	// warning channel later via the lifecycle writer, but for v0.1 a
+	// failure here aborts construction so a misconfigured runDir is
+	// loud at the same site as the writer opens below.
+	if _, err := CleanupStaleLeaksTemp(opts.RunDir, now()); err != nil {
+		return nil, fmt.Errorf("run: cleanup stale leaks tmp: %w", err)
+	}
+
 	lcWri, err := OpenLifecycleWriter(opts.RunDir, LifecycleWriterOptions{
 		RunID:   opts.RunID,
 		Backend: opts.Backend,
@@ -1802,6 +1818,14 @@ func (s *Supervisor) writeRecordSnapshot(state State, exitCode *int, stopReason 
 		ModelCredentialMode: s.opts.ModelCredentialMode,
 		ReducedSafety:       s.opts.ReducedSafety,
 		LinkedPreviousRun:   s.opts.LinkedPreviousRun,
+		// Plan §0.2 + §0 Schema-version contract: the supervisor
+		// populates the schema_versions map at every snapshot so a
+		// mid-run reader (status command, audit tail, leaks
+		// aggregator) sees the per-stream versions immediately,
+		// not only after the run terminates. The map is built from
+		// the package-level CurrentSchemaVersions snapshot to keep
+		// the writer free of per-supervisor branching.
+		SchemaVersions: CurrentSchemaVersions(),
 	}
 	return WriteRecord(s.opts.RunDir, rec)
 }

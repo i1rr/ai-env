@@ -397,13 +397,58 @@ func TestRedactSecrets(t *testing.T) {
 		{"no secret", "hello world", "hello world"},
 		{
 			"anthropic key",
-			"key=sk-ant-abcdef0123456789abc rest",
+			"key=sk-ant-abcdef0123456789abcdef0123 rest",
 			"key=REDACTED rest",
 		},
 		{
 			"openai key",
 			"key=sk-abcdefghij0123456789xyz rest",
 			"key=REDACTED rest",
+		},
+		{
+			"github personal access token",
+			"trace: ghp_abcdefghijklmnopqrstuvwxyz0123456789 done",
+			"trace: REDACTED done",
+		},
+		{
+			"github fine-grained PAT",
+			"trace: github_pat_abcdefghij0123456789 done",
+			"trace: REDACTED done",
+		},
+		{
+			"aws access key id",
+			"trace: AKIAIOSFODNN7EXAMPLE done",
+			"trace: REDACTED done",
+		},
+		{
+			"google cloud api key",
+			"trace: AIzaSyA-abcdefghij0123456789KLMNOPQRSTU done",
+			"trace: REDACTED done",
+		},
+		{
+			"slack token",
+			"trace: xoxb-1234567890-abcdefghij done",
+			"trace: REDACTED done",
+		},
+		{
+			"stripe key",
+			"trace: sk_live_abcdefghij0123456789xyz done",
+			"trace: REDACTED done",
+		},
+		{
+			"openssh private key header",
+			"begin: -----BEGIN OPENSSH PRIVATE KEY----- end",
+			"begin: REDACTED end",
+		},
+		{
+			"env secret assignment",
+			"config: API_SECRET=supersecret123 trailing",
+			"config: REDACTED trailing",
+		},
+		{
+			"bare password assignment",
+			"config: PASSWORD=hunter2hunter2 trailing",
+			"config: REDACTED trailing",
 		},
 		{
 			"authorization header",

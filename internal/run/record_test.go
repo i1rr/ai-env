@@ -147,6 +147,7 @@ func TestRecord_OnDiskJSONMatchesPlanSchema(t *testing.T) {
 		"model_credential_mode",
 		"reduced_safety",
 		"linked_previous_run",
+		"schema_versions",
 	}
 	var generic map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &generic); err != nil {

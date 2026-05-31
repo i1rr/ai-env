@@ -51,13 +51,27 @@ const runIDTimeLayout = "20060102-150405"
 // recognize in a `ls` listing.
 const runIDRandomBytes = 3
 
-// runDirMode is the permission mode used for every directory the run
-// scaffolding creates (the run directory itself and the scan-results
-// subdirectory). 0o755 matches the rest of the project's "user writes,
-// group/others read" convention; ai-env intentionally does not try to be
-// stricter than the surrounding workspace tree because the host user is
-// the only principal expected to read these artifacts directly.
+// runDirMode is the permission mode used for intermediate parent
+// directories (e.g. .ai-env/runs/) and the scan-results subdirectory
+// inside a run. 0o755 matches the project's "user writes, group/others
+// read" convention for the broader workspace tree.
+//
+// The run directory itself (.ai-env/runs/<run-id>/) is created with this
+// permission and then tightened to runDirModeStrict (0o700) at the end of
+// CreateRunDirectory per Plan §0.2: the run directory holds the per-run
+// control socket, MCP server tokens, and proxy credentials, so even
+// "world readable" by the host user's group is too permissive. The
+// stricter mode lands after every per-run file has been materialized
+// so a partially populated tree still cleans up correctly if the
+// chmod itself fails.
 const runDirMode os.FileMode = 0o755
+
+// runDirModeStrict is the permission mode applied to the run directory
+// itself at the end of CreateRunDirectory. 0o700 keeps the per-run
+// control socket, MCP server-token registry, and provider proxy logs
+// inaccessible to any other host user. Plan §0.2 calls this out
+// explicitly: "CreateRunDirectory ends with chmod runDir 0700".
+const runDirModeStrict os.FileMode = 0o700
 
 // runFileMode is the permission mode used for every file the run
 // scaffolding creates (task.md and the empty stream/log placeholders).
@@ -96,6 +110,8 @@ var runFileNames = []string{
 	"network-events.jsonl",
 	"policy-decisions.jsonl",
 	"mcp-calls.jsonl",
+	"leaks.jsonl",
+	"transcript.jsonl",
 	"git-diff.patch",
 	"secret-scan.json",
 	"dependency-report.json",
@@ -339,6 +355,21 @@ func CreateRunDirectory(aiEnvDir, runID string, now time.Time) (RunDirectory, er
 			cleanup()
 			return RunDirectory{}, fmt.Errorf("run: create %s: %w", path, err)
 		}
+	}
+
+	// Plan §0.2: tighten the run directory itself to 0o700 after
+	// every per-run placeholder lands. The run dir holds the
+	// per-run control socket, MCP server-token registry, and
+	// provider proxy logs; even "world readable" via the host
+	// user's group is too permissive. We do this last so a
+	// partially populated tree (which the cleanup() defer above
+	// removes on every earlier error path) cannot leak through a
+	// failed Chmod: if Chmod itself fails the tree is rolled back
+	// too. The umask-resistance argument matches createEmptyFile's
+	// trailing Chmod.
+	if err := os.Chmod(runDir, runDirModeStrict); err != nil {
+		cleanup()
+		return RunDirectory{}, fmt.Errorf("run: tighten run dir %s to 0o700: %w", runDir, err)
 	}
 
 	return RunDirectory{

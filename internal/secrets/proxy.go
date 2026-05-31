@@ -558,29 +558,100 @@ func knownProviderList() string {
 
 // secretPatterns matches token-like fragments the proxy might emit
 // into a log line. Each pattern is conservative: false positives are
-// preferable to leaking a real token. The patterns mirror the master
-// plan's secret-scanner intent (see plan 06 step 1) but are inlined
-// here so the proxy can self-scrub even before the scanner package
-// lands.
+// preferable to leaking a real token.
 //
-// Patterns covered today:
+// The set is intentionally a mirror of `internal/scanners`.builtinPatterns()
+// (kept inlined rather than imported so the secrets package stays a leaf
+// of the dependency graph — every other package that wants self-redaction
+// can call RedactSecrets without dragging the scanner registry along).
+// Whenever scanners.builtinPatterns() grows a new provider rule, this
+// list must grow the same rule; the Batch 0.2 acceptance covers the
+// parity case.
 //
-//   - sk-... (OpenAI-style, "sk-" followed by 20+ allowed chars).
-//   - sk-ant-... (Anthropic-style, "sk-ant-" prefix).
-//   - "Authorization: Bearer ..." headers (value redacted).
-//   - "x-api-key: ..." headers (value redacted).
+// Patterns covered (per Plan §0.2):
+//
+//   - Anthropic API keys (sk-ant-...).
+//   - OpenAI / generic sk- keys (including sk-proj-).
+//   - GitHub tokens: ghp_, gho_, ghs_, github_pat_.
+//   - npm tokens (npm_).
+//   - PyPI tokens (pypi-AgEIcHlwaS5vcmc...).
+//   - AWS access key IDs (AKIA / ASIA).
+//   - Google Cloud API keys (AIza...).
+//   - Azure storage account keys (AccountKey=...).
+//   - Slack tokens (xox[abprs]-...).
+//   - Stripe keys (sk|rk|pk_(live|test)_...).
+//   - PEM private-key headers (RSA / EC / OPENSSH / DSA / PGP / generic).
+//   - .env-style "<KEY>=<value>" assignments where <KEY> ends in
+//     _SECRET / _TOKEN / _KEY / _API_KEY / _PASSWORD, plus a bare
+//     PASSWORD= form.
+//   - Authorization: Bearer <token> headers (header + value redacted).
+//   - x-api-key: <token> headers (header + value redacted).
+//
+// SSH key blobs are folded into the PEM header rules (the "BEGIN
+// OPENSSH PRIVATE KEY" / "BEGIN RSA PRIVATE KEY" headers are the
+// canonical leading bytes of any leaked key blob; the body that
+// follows is base64 and would re-match the entropy analyzer in the
+// scanner package, which is out of scope for the proxy).
 //
 // The redaction replaces the matched substring with "REDACTED" so the
 // surrounding log line stays grep-friendly while the secret is gone.
 var secretPatterns = []*regexp.Regexp{
-	// Anthropic-style keys (longer prefix matched first so a generic
-	// sk- pattern does not partial-match).
-	regexp.MustCompile(`sk-ant-[A-Za-z0-9_\-]{16,}`),
-	// OpenAI / generic sk- keys.
-	regexp.MustCompile(`sk-[A-Za-z0-9_\-]{20,}`),
-	// Authorization: Bearer <token>. Case-insensitive header name; the
-	// token may be any non-whitespace run. The capture replaces the
-	// whole header including the value.
+	// --- provider API keys (mirror scanners.builtinPatterns) -----------
+	// Anthropic keys (longer prefix matched first so the generic sk-
+	// rule below does not partial-match).
+	regexp.MustCompile(`\bsk-ant-[A-Za-z0-9_\-]{20,}`),
+	// OpenAI / generic sk- keys (including sk-proj-).
+	regexp.MustCompile(`\bsk-(?:proj-)?[A-Za-z0-9]{20,}`),
+	// GitHub personal access tokens.
+	regexp.MustCompile(`\bghp_[A-Za-z0-9]{30,}`),
+	// GitHub fine-grained PATs.
+	regexp.MustCompile(`\bgithub_pat_[A-Za-z0-9_]{20,}`),
+	// GitHub OAuth tokens.
+	regexp.MustCompile(`\bgho_[A-Za-z0-9]{30,}`),
+	// GitHub server tokens.
+	regexp.MustCompile(`\bghs_[A-Za-z0-9]{30,}`),
+	// npm tokens.
+	regexp.MustCompile(`\bnpm_[A-Za-z0-9]{30,}`),
+	// PyPI tokens.
+	regexp.MustCompile(`\bpypi-AgEIcHlwaS5vcmc[A-Za-z0-9_\-]{20,}`),
+	// AWS access key IDs (long-lived).
+	regexp.MustCompile(`\bAKIA[0-9A-Z]{16}\b`),
+	// AWS temporary access key IDs.
+	regexp.MustCompile(`\bASIA[0-9A-Z]{16}\b`),
+	// Google Cloud API keys.
+	regexp.MustCompile(`\bAIza[0-9A-Za-z_\-]{35}\b`),
+	// Azure storage AccountKey assignments. Match the conventional
+	// AccountKey=<b64> prefix to avoid false positives on bare base64.
+	regexp.MustCompile(`(?i)AccountKey=[A-Za-z0-9+/]{60,}={0,2}`),
+	// Slack tokens.
+	regexp.MustCompile(`\bxox[abprs]-[A-Za-z0-9\-]{10,}`),
+	// Stripe live / test keys.
+	regexp.MustCompile(`\b(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{20,}`),
+
+	// --- private key headers ------------------------------------------
+	regexp.MustCompile(`-----BEGIN RSA PRIVATE KEY-----`),
+	regexp.MustCompile(`-----BEGIN EC PRIVATE KEY-----`),
+	regexp.MustCompile(`-----BEGIN OPENSSH PRIVATE KEY-----`),
+	regexp.MustCompile(`-----BEGIN DSA PRIVATE KEY-----`),
+	regexp.MustCompile(`-----BEGIN PGP PRIVATE KEY BLOCK-----`),
+	regexp.MustCompile(`-----BEGIN PRIVATE KEY-----`),
+
+	// --- .env-style assignments ---------------------------------------
+	// "<KEY>=<value>" where <KEY> ends in _SECRET / _TOKEN / _KEY /
+	// _API_KEY / _PASSWORD. Value must be at least 8 non-whitespace
+	// chars so empty / obvious-placeholder lines do not trip the rule.
+	regexp.MustCompile(
+		`(?i)\b[A-Z][A-Z0-9_]*(?:_SECRET|_TOKEN|_KEY|_API_KEY|_PASSWORD)\s*[:=]\s*["']?[^\s"'#]{8,}["']?`,
+	),
+	// Bare PASSWORD=... assignment.
+	regexp.MustCompile(
+		`(?i)\bPASSWORD\s*[:=]\s*["']?[^\s"'#]{8,}["']?`,
+	),
+
+	// --- auth headers -------------------------------------------------
+	// Authorization: Bearer <token>. The capture replaces the whole
+	// header including the value so a header echoed back into a log
+	// line is gone in one pass.
 	regexp.MustCompile(`(?i)Authorization:\s*Bearer\s+\S+`),
 	// x-api-key: <token>. Same shape as Authorization above.
 	regexp.MustCompile(`(?i)x-api-key:\s*\S+`),
