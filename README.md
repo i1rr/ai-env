@@ -171,7 +171,7 @@ When the supervisor (`internal/run`) drives a run, it materializes everything un
   stderr.log           # disk-streamed agent stderr (not memory-buffered)
   agent-command.txt    # placeholder for the launched agent command
   transcript.md        # placeholder for the rendered transcript
-  shell-commands.jsonl # populated by shell shim (later plans)
+  shell-commands.jsonl # populated by the optional shell shim when `--shell-shim` is wired (plan 08)
   filesystem-events.jsonl
   network-events.jsonl # one JSON object per network decision (plan 05)
   policy-decisions.jsonl # one JSON object per export-gate verdict and broker stage (plan 07)
@@ -246,6 +246,26 @@ Four implementations ship today:
 - `internal/backend/docker` and `internal/backend/podman` are the reduced-isolation fallback backends. Each shells out to the respective host CLI (rootless or rooted: the adapters do not distinguish, but the master plan recommends rootless), brings up a container per env with `--network none` by default, and refuses to mark itself `Available` in autonomous mode unless the operator passes `--accept-reduced-isolation`. Both fallbacks print the verbatim reduced-isolation warning text from the plan the first time `Detect` observes acceptance. Their `ApplyNetworkPolicy` implementation is a structural validator only: `network none` honors every policy trivially (the container has no outbound network), and `--unsafe-host-network` (which requires both `--accept-reduced-isolation` and an explicit `--unsafe-host-network` toggle) accepts only policies with `default: allow` or with no allow-domain list, because the rootless fallback has no per-destination firewall. See "Reduced-isolation fallback backends" below.
 
 The supervisor in `internal/run/supervisor.go` exposes an optional `BackendAdapter` field on its options. When non-nil, the supervisor routes the child process through `Backend.Exec` against the supplied `BackendEnvID` instead of spawning host-side via `exec.Command`. The fallback path (no `BackendAdapter`) keeps the legacy host-exec wiring so the pre-plan-04 lifecycle, signal, and timeout tests continue to drive real subprocesses without constructing a backend. Production code paths (the forthcoming `ai-env run` CLI) always supply a backend. The supervisor also exposes an optional `NetworkPolicyAdapter` plus a `NetworkPolicy` value: when both are set the supervisor calls `Adapter.Apply` during `StateApplyingPolicy` and aborts the run with `StateFailedPolicy` / `stop_reason: policy_failure` on any error, satisfying the master plan's fail-closed contract.
+
+## Optional shell shim (`--shell-shim`)
+
+Plan 08 step 8 introduced an experimental shell-shim prototype in `internal/policy/shim.go`: when an operator passes `--shell-shim` to the future `ai-env run` subcommand the supervisor will wrap the agent's `bash` / `sh` invocations through a thin wrapper binary that logs each command attempt, denies obvious high-risk patterns (curl-pipe-shell, access to SSH paths, cloud metadata IP), and forwards the rest to the real binary.
+
+Plan 08 step 9 wires the supervisor side of that flag. Two new fields on `run.SupervisorOptions` opt the supervisor into the prototype:
+
+- `ShellShim bool`: enables shim wiring. When true the supervisor opens `shell-commands.jsonl` in the run directory and prepends `ShellShimDir` to the child's PATH so the wrapper resolves before the real system binary. Requires `PolicyEngine` or `PolicyEnginePath`; without an engine the supervisor fails fast at construction rather than silently degrading into "log every command, deny none."
+- `ShellShimDir string`: absolute path of the directory holding the wrapper binary. The supervisor does not invent the directory: the caller (the future CLI or a test fixture) materializes the wrapper there before the run starts.
+
+`run.InjectShimPath(env, shimDir)` is the exported helper the supervisor (and the future CLI) use to mutate the PATH entry: it prepends `shimDir` to an existing `PATH=` entry or appends a fresh `PATH=<shimDir>` when the env did not carry one.
+
+The shim is an experimental, cooperative interception point, not the primary boundary. The same four limitations the master plan documents apply:
+
+1. **Agents may invoke absolute paths.** An agent that calls `/usr/bin/curl` directly bypasses the wrapper; the shim only catches commands that resolve through PATH.
+2. **Static binaries bypass shell wrappers.** The shim intercepts shells (`bash`, `sh`), not arbitrary executables.
+3. **Interpreters can execute code internally.** A `python -c "..."` call is one command to the shim; the shim cannot see the inner statements.
+4. **Kernel-level and network-level controls remain the real boundary.** Filesystem isolation (the backend), the network policy adapter, and the credential broker are the surfaces that actually enforce policy; the shim is defense-in-depth, not the primary enforcement point.
+
+The user-facing CLI flag itself (`ai-env run --shell-shim`) lands in a later plan that introduces the `ai-env run` subcommand; the `SupervisorOptions.ShellShim` field and the shell-shim wiring are the underlying primitives that flag will toggle.
 
 ## Agent launchers
 

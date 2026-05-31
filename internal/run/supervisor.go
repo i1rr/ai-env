@@ -7,12 +7,14 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/rivan1986/ai-env/internal/backend"
 	"github.com/rivan1986/ai-env/internal/network"
+	"github.com/rivan1986/ai-env/internal/policy"
 )
 
 // defaultStatsPollInterval is how often the supervisor's stats / idle /
@@ -357,6 +359,34 @@ type SupervisorOptions struct {
 	// os.Stdout; tests pass a bytes.Buffer to assert on the printed
 	// text.
 	UserOutput io.Writer
+
+	// ShellShim, when true, asks the supervisor to wire the optional
+	// shell-shim prototype (internal/policy.Shim) into the run. This is
+	// the option the future `ai-env run --shell-shim` CLI flag (plan 08
+	// step 9) flips: when set the supervisor opens shell-commands.jsonl
+	// in the run directory and prepends ShellShimDir to the child's
+	// PATH so the wrapper binary (replacing bash / sh) is resolved
+	// before the real system binary.
+	//
+	// Requires a configured policy engine (PolicyEngine or
+	// PolicyEnginePath) and a non-empty ShellShimDir; without those the
+	// supervisor would silently degrade into "log every command, deny
+	// none" which is the wrong default for the prototype. NewSupervisor
+	// rejects the misconfiguration with a clear error.
+	//
+	// Leaving ShellShim=false skips the wiring entirely: no shell-
+	// commands log is opened, the child's PATH is passed through
+	// verbatim, and legacy supervisor callers see no behavioral change.
+	ShellShim bool
+
+	// ShellShimDir is the absolute path of the directory the supervisor
+	// prepends to the child's PATH when ShellShim is true. The shim
+	// binary itself (the wrapper replacing bash / sh / etc.) lives
+	// inside this directory; the caller (the future `ai-env run` CLI or
+	// a test fixture) is responsible for placing the wrapper before the
+	// supervisor is started. Ignored when ShellShim is false; required
+	// otherwise.
+	ShellShimDir string
 }
 
 // SupervisorResult is the outcome the supervisor reports back from Run.
@@ -446,6 +476,15 @@ type Supervisor struct {
 	netWri  *NetworkEventsWriter
 	pdWri   *PolicyDecisionsWriter
 	streams *StreamCapture
+
+	// shellCmdLog, when non-nil, is the per-run shell-commands.jsonl
+	// writer the shim appends to. It is opened by NewSupervisor only
+	// when SupervisorOptions.ShellShim is true and closed alongside the
+	// other per-run JSONL writers in Run's deferred drain. A nil log
+	// (the legacy default) means the supervisor was not asked to wire
+	// the shim; no shell-commands.jsonl is materialized in the run
+	// directory.
+	shellCmdLog *policy.ShellCommandsLog
 
 	// engine, when non-nil, is the policy engine the supervisor
 	// consults for runtime decisions (EvaluateNetworkDomain,
@@ -606,6 +645,16 @@ func NewSupervisor(opts SupervisorOptions) (*Supervisor, error) {
 		// different reasons.
 		return nil, errors.New("run: NewSupervisor: PolicyEnginePath and PolicyEngine are mutually exclusive")
 	}
+	if opts.ShellShim && strings.TrimSpace(opts.ShellShimDir) == "" {
+		// Plan 08 step 9 wires the shim only when the caller also tells
+		// the supervisor where the wrapper binary lives. The supervisor
+		// does not invent a directory: the future `ai-env run` CLI and
+		// test fixtures both pin the location explicitly. Failing fast
+		// here keeps the misuse surface close to the misconfiguration
+		// rather than mid-launch (the PATH mutation would otherwise
+		// silently no-op and the agent would call real bash directly).
+		return nil, errors.New("run: NewSupervisor: ShellShim requires ShellShimDir")
+	}
 
 	now := opts.Now
 	if now == nil {
@@ -707,16 +756,56 @@ func NewSupervisor(opts SupervisorOptions) (*Supervisor, error) {
 		}
 	}
 
+	// Plan 08 step 9: wire the optional shell-shim prototype. When
+	// ShellShim is true the supervisor (a) requires a configured
+	// engine, (b) opens shell-commands.jsonl in the run directory, and
+	// (c) prepends ShellShimDir to the child's PATH so the wrapper
+	// binary resolves before the real system binary. The wiring is
+	// performed here so any setup error tears down the writers opened
+	// above; this keeps the fail-fast surface uniform with the other
+	// per-run writers. Validation that ShellShim implies engine lives
+	// alongside the helpers in shim_wire.go.
+	var shellCmdLog *policy.ShellCommandsLog
+	if opts.ShellShim {
+		if err := validateShellShimOptions(opts, engine); err != nil {
+			if pdWri != nil {
+				_ = pdWri.Close()
+			}
+			_ = streams.Close()
+			_ = netWri.Close()
+			_ = lcWri.Close()
+			return nil, err
+		}
+		shellCmdLog, err = openShellCommandsLog(opts.RunDir, opts.RunID, now)
+		if err != nil {
+			if pdWri != nil {
+				_ = pdWri.Close()
+			}
+			_ = streams.Close()
+			_ = netWri.Close()
+			_ = lcWri.Close()
+			return nil, err
+		}
+		// Mutate the child's PATH so the shim directory resolves first.
+		// We rewrite opts.Command.Env in place on the SupervisorOptions
+		// value the supervisor stores so launchChildHost /
+		// launchChildBackend see the updated slice without an extra
+		// indirection. The original caller's slice is not aliased: the
+		// helper copies before mutating.
+		opts.Command.Env = InjectShimPath(opts.Command.Env, opts.ShellShimDir)
+	}
+
 	return &Supervisor{
-		opts:     opts,
-		machine:  machine,
-		lcWri:    lcWri,
-		netWri:   netWri,
-		pdWri:    pdWri,
-		streams:  streams,
-		engine:   engine,
-		now:      now,
-		cancelCh: make(chan struct{}),
+		opts:        opts,
+		machine:     machine,
+		lcWri:       lcWri,
+		netWri:      netWri,
+		pdWri:       pdWri,
+		streams:     streams,
+		shellCmdLog: shellCmdLog,
+		engine:      engine,
+		now:         now,
+		cancelCh:    make(chan struct{}),
 	}, nil
 }
 
@@ -800,6 +889,9 @@ func (s *Supervisor) Run(ctx context.Context) (SupervisorResult, error) {
 		_ = s.netWri.Close()
 		if s.pdWri != nil {
 			_ = s.pdWri.Close()
+		}
+		if s.shellCmdLog != nil {
+			_ = s.shellCmdLog.Close()
 		}
 		_ = s.lcWri.Close()
 	}()
