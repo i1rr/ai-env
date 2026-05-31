@@ -44,8 +44,170 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(newReportCmd())
 	root.AddCommand(newAgentsCmd())
 	root.AddCommand(newScanCmd())
+	root.AddCommand(newPolicyCmd())
 
 	return root
+}
+
+// newPolicyCmd builds the `ai-env policy` parent command and attaches
+// its subcommands (init, check, explain, allow, deny). The parent has
+// no body of its own; running it prints the standard Cobra help so
+// operators can discover the subcommands via `ai-env policy -h` (plan
+// 08 steps 3-6).
+func newPolicyCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "policy",
+		Short: "Inspect and mutate the project's policy.yaml",
+		Long: "Inspect and mutate the project's .ai-env/policy.yaml document. " +
+			"Use `init` to scaffold a default policy, `check <env-name>` to " +
+			"print the effective summary, `explain <env-name> --event <id>` " +
+			"to look up a recorded policy decision from the run trail, and " +
+			"`allow|deny domain|tool <env-name> <value>` to grant or refuse " +
+			"a specific domain (network.allow_domains) or tool / command " +
+			"pattern (commands.deny_patterns).",
+	}
+	cmd.AddCommand(newPolicyInitCmd())
+	cmd.AddCommand(newPolicyCheckCmd())
+	cmd.AddCommand(newPolicyExplainCmd())
+	cmd.AddCommand(newPolicyAllowCmd())
+	cmd.AddCommand(newPolicyDenyCmd())
+	return cmd
+}
+
+// newPolicyInitCmd builds `ai-env policy init`. The body lives in
+// internal/cli.RunPolicyInit; the Cobra layer is a thin pass-through.
+func newPolicyInitCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "init",
+		Short: "Scaffold a default .ai-env/policy.yaml for the current project",
+		Long: "Write a conservative default policy.yaml into the current " +
+			"project's .ai-env/ directory. Refuses to overwrite an existing " +
+			"file unless --force is passed.",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			force, err := cmd.Flags().GetBool("force")
+			if err != nil {
+				return fmt.Errorf("ai-env policy init: read --force: %w", err)
+			}
+			return cli.RunPolicyInit(cli.PolicyInitOptions{
+				Force:  force,
+				Stdout: cmd.OutOrStdout(),
+				Stderr: cmd.ErrOrStderr(),
+			})
+		},
+	}
+	cmd.Flags().Bool("force", false, "Overwrite an existing .ai-env/policy.yaml")
+	return cmd
+}
+
+// newPolicyCheckCmd builds `ai-env policy check <env-name>`.
+func newPolicyCheckCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "check <env-name>",
+		Short: "Print the effective policy.yaml summary for an env",
+		Long: "Print a human-readable summary of the project's policy.yaml " +
+			"and any structural warnings (missing required fields, " +
+			"permissive defaults). The <env-name> argument identifies which " +
+			"env the audit context applies to; v0.1 stores one policy.yaml " +
+			"per project so the summary itself is project-wide.",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return cli.RunPolicyCheck(cli.PolicyCheckOptions{
+				EnvName: args[0],
+				Stdout:  cmd.OutOrStdout(),
+				Stderr:  cmd.ErrOrStderr(),
+			})
+		},
+	}
+	return cmd
+}
+
+// newPolicyExplainCmd builds `ai-env policy explain <env-name> --event <id>`.
+func newPolicyExplainCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "explain <env-name> --event <event-id>",
+		Short: "Look up a recorded policy decision from the env's run trail",
+		Long: "Look up one record from the env's policy-decisions.jsonl " +
+			"trail and render its fields (event id, action, decision, " +
+			"reason, metadata, etc.) plus the raw JSON envelope so a " +
+			"downstream consumer can pipe the output into jq. The lookup " +
+			"matches the engine's `evt_<ts>_<hex>` id first and falls back " +
+			"to the Action / Event verb so the operator can also ask for " +
+			"e.g. `broker_push_branch`.",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			eventID, err := cmd.Flags().GetString("event")
+			if err != nil {
+				return fmt.Errorf("ai-env policy explain: read --event: %w", err)
+			}
+			runID, err := cmd.Flags().GetString("run")
+			if err != nil {
+				return fmt.Errorf("ai-env policy explain: read --run: %w", err)
+			}
+			return cli.RunPolicyExplain(cli.PolicyExplainOptions{
+				EnvName: args[0],
+				EventID: eventID,
+				RunID:   runID,
+				Stdout:  cmd.OutOrStdout(),
+				Stderr:  cmd.ErrOrStderr(),
+			})
+		},
+	}
+	cmd.Flags().String("event", "", "Event id to look up (the engine's evt_<ts>_<hex> id, or an Action/Event verb)")
+	cmd.Flags().String("run", "", "Specific run id whose trail to search (defaults to the env's latest run)")
+	_ = cmd.MarkFlagRequired("event")
+	return cmd
+}
+
+// newPolicyAllowCmd builds `ai-env policy allow domain|tool <env-name> <value>`.
+func newPolicyAllowCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "allow domain|tool <env-name> <value>",
+		Short: "Grant a domain or tool pattern in policy.yaml",
+		Long: "Mutate policy.yaml to grant a domain or tool pattern. " +
+			"`allow domain <name>` appends <name> to network.allow_domains; " +
+			"`allow tool <pattern>` removes <pattern> from " +
+			"commands.deny_patterns (v0.1 has no per-tool allow list, so " +
+			"allowing a tool means clearing its deny entry). A no-op " +
+			"mutation exits 0 with a notice on stderr.",
+		Args: cobra.ExactArgs(3),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return cli.RunPolicyMutate(cli.PolicyMutateOptions{
+				Action:  cli.PolicyMutateAllow,
+				Kind:    cli.PolicyMutateKind(args[0]),
+				EnvName: args[1],
+				Value:   args[2],
+				Stdout:  cmd.OutOrStdout(),
+				Stderr:  cmd.ErrOrStderr(),
+			})
+		},
+	}
+	return cmd
+}
+
+// newPolicyDenyCmd builds `ai-env policy deny domain|tool <env-name> <value>`.
+func newPolicyDenyCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "deny domain|tool <env-name> <value>",
+		Short: "Refuse a domain or tool pattern in policy.yaml",
+		Long: "Mutate policy.yaml to refuse a domain or tool pattern. " +
+			"`deny domain <name>` removes <name> from network.allow_domains " +
+			"(under network.default=deny the absence is itself the deny); " +
+			"`deny tool <pattern>` appends <pattern> to commands.deny_patterns. " +
+			"A no-op mutation exits 0 with a notice on stderr.",
+		Args: cobra.ExactArgs(3),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return cli.RunPolicyMutate(cli.PolicyMutateOptions{
+				Action:  cli.PolicyMutateDeny,
+				Kind:    cli.PolicyMutateKind(args[0]),
+				EnvName: args[1],
+				Value:   args[2],
+				Stdout:  cmd.OutOrStdout(),
+				Stderr:  cmd.ErrOrStderr(),
+			})
+		},
+	}
+	return cmd
 }
 
 // newScanCmd builds the `ai-env scan` subcommand. Flag parsing happens
