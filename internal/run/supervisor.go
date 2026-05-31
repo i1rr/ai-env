@@ -198,6 +198,33 @@ type SupervisorOptions struct {
 	// them independently without reshaping SupervisorOptions.
 	NetworkPolicyEnvID string
 
+	// PolicyEnginePath, when non-empty, asks NewSupervisor to load and
+	// validate the policy.yaml at this path and instantiate a
+	// PolicyEngine. Plan 08 step 7 enforces "validate config before
+	// starting sandbox": a malformed policy.yaml aborts construction
+	// with a clear error so the supervisor never reaches the
+	// backend-start phase.
+	//
+	// Mutually exclusive with PolicyEngine: a non-empty path plus a
+	// non-nil engine is a configuration error and is rejected at
+	// construction time so an operator does not accidentally wire two
+	// different policies and pick one silently.
+	PolicyEnginePath string
+
+	// PolicyEngine, when non-nil, is the already-constructed policy
+	// engine the supervisor uses for runtime network and shell
+	// decisions. This is the dependency-injection path tests use to
+	// drive deterministic verdicts; production callers either set
+	// PolicyEnginePath (the supervisor loads the file) or wire an
+	// engine they constructed elsewhere (e.g. the future `ai-env run`
+	// CLI that shares the engine with the network policy installer).
+	//
+	// Setting PolicyEngine without PolicyEnginePath is fine: the
+	// supervisor still opens the per-run policy-decisions.jsonl writer
+	// so every EvaluateNetworkDomain / EvaluateShellCommand call is
+	// recorded.
+	PolicyEngine PolicyEngine
+
 	// Stdin, when non-nil, is the reader the supervisor pipes into the
 	// child's stdin. Used by the agent launchers (claude, codex) to hand
 	// the task prompt to the agent CLI. Nil means "no stdin" (the agent
@@ -417,7 +444,18 @@ type Supervisor struct {
 	machine *Machine
 	lcWri   *LifecycleWriter
 	netWri  *NetworkEventsWriter
+	pdWri   *PolicyDecisionsWriter
 	streams *StreamCapture
+
+	// engine, when non-nil, is the policy engine the supervisor
+	// consults for runtime decisions (EvaluateNetworkDomain,
+	// EvaluateShellCommand). It is wired by NewSupervisor either from
+	// SupervisorOptions.PolicyEngine (already-constructed) or by
+	// loading SupervisorOptions.PolicyEnginePath. A nil engine means
+	// no policy was configured for this run; the EvaluateX helpers
+	// degrade to no-ops in that case so legacy supervisor callers
+	// (plan-03 / plan-04 / plan-05 tests) continue to pass.
+	engine PolicyEngine
 
 	now func() time.Time
 
@@ -454,9 +492,9 @@ type Supervisor struct {
 	// helpers can take a single lock regardless of which exec path is
 	// in flight. Exactly one of child / backendActive is meaningful at
 	// any time, set by launchChild based on opts.BackendAdapter.
-	childMu  sync.Mutex
-	child    *exec.Cmd
-	childErr error
+	childMu   sync.Mutex
+	child     *exec.Cmd
+	childErr  error
 	childDone chan struct{}
 	waitOnce  sync.Once
 
@@ -561,6 +599,13 @@ func NewSupervisor(opts SupervisorOptions) (*Supervisor, error) {
 	if opts.ScanTimeout < 0 {
 		return nil, fmt.Errorf("run: NewSupervisor: ScanTimeout must be non-negative, got %v", opts.ScanTimeout)
 	}
+	if opts.PolicyEnginePath != "" && opts.PolicyEngine != nil {
+		// Plan 08 step 7 expects exactly one source of truth for the
+		// engine. Rejecting both up front prevents a silent precedence
+		// rule that would surprise an operator who wired both for
+		// different reasons.
+		return nil, errors.New("run: NewSupervisor: PolicyEnginePath and PolicyEngine are mutually exclusive")
+	}
 
 	now := opts.Now
 	if now == nil {
@@ -619,12 +664,57 @@ func NewSupervisor(opts SupervisorOptions) (*Supervisor, error) {
 		return nil, err
 	}
 
+	// Plan 08 step 7: load the env's policy file before starting the
+	// sandbox so a malformed policy aborts the run with a clear error
+	// rather than crashing mid-execution. We do the load here, after
+	// the lifecycle / network / stream writers are open, so an
+	// operator's "supervisor failed to construct" report still shows
+	// the same fail-fast surface for all setup errors. A malformed
+	// policy at this stage tears down the writers below and returns
+	// the underlying parse / validate error verbatim.
+	engine := opts.PolicyEngine
+	if engine == nil && opts.PolicyEnginePath != "" {
+		loaded, _, loadErr := LoadPolicyEngine(opts.PolicyEnginePath)
+		if loadErr != nil {
+			_ = streams.Close()
+			_ = netWri.Close()
+			_ = lcWri.Close()
+			return nil, loadErr
+		}
+		engine = loaded
+	}
+
+	// Plan 08 step 7: open the per-run policy-decisions.jsonl writer
+	// whenever an engine is configured so every EvaluateNetworkDomain
+	// / EvaluateShellCommand call lands a record on disk. We open the
+	// writer alongside the lifecycle / network writers so the three
+	// share a lifetime: all opened here, all closed in Run's deferred
+	// drain. When no engine is wired the writer stays nil and the
+	// EvaluateX helpers degrade to no-ops, which preserves the legacy
+	// supervisor behavior the plan-03 / plan-04 / plan-05 tests rely
+	// on.
+	var pdWri *PolicyDecisionsWriter
+	if engine != nil {
+		pdWri, err = OpenPolicyDecisionsWriter(opts.RunDir, PolicyDecisionsWriterOptions{
+			RunID: opts.RunID,
+			Now:   now,
+		})
+		if err != nil {
+			_ = streams.Close()
+			_ = netWri.Close()
+			_ = lcWri.Close()
+			return nil, err
+		}
+	}
+
 	return &Supervisor{
 		opts:     opts,
 		machine:  machine,
 		lcWri:    lcWri,
 		netWri:   netWri,
+		pdWri:    pdWri,
 		streams:  streams,
+		engine:   engine,
 		now:      now,
 		cancelCh: make(chan struct{}),
 	}, nil
@@ -708,6 +798,9 @@ func (s *Supervisor) Run(ctx context.Context) (SupervisorResult, error) {
 	defer func() {
 		_ = s.streams.Close()
 		_ = s.netWri.Close()
+		if s.pdWri != nil {
+			_ = s.pdWri.Close()
+		}
 		_ = s.lcWri.Close()
 	}()
 
@@ -945,10 +1038,10 @@ func (s *Supervisor) applyNetworkPolicy() error {
 	// terminal in StateFailedPolicy / completed so an operator is never
 	// blind to what happened.
 	_ = s.writeNetworkEvent(NetworkEvent{
-		Event: NetworkEventPolicyApplyAttempt,
-		EnvID: envID,
-		Backend: s.opts.NetworkPolicyAdapter.Name(),
-		Default: s.opts.NetworkPolicy.Default,
+		Event:        NetworkEventPolicyApplyAttempt,
+		EnvID:        envID,
+		Backend:      s.opts.NetworkPolicyAdapter.Name(),
+		Default:      s.opts.NetworkPolicy.Default,
 		AllowDomains: append([]string(nil), s.opts.NetworkPolicy.AllowDomains...),
 		BlockedCIDRs: s.opts.NetworkPolicy.BlockedCIDRs(),
 		BlockedHosts: s.opts.NetworkPolicy.BlockedHosts(),
@@ -961,23 +1054,23 @@ func (s *Supervisor) applyNetworkPolicy() error {
 		// The supervisor returns the err verbatim: the caller in Run
 		// turns it into StateFailedPolicy / StopReasonPolicyFailure.
 		_ = s.writeNetworkEvent(NetworkEvent{
-			Event: NetworkEventPolicyApplyFailed,
-			EnvID: envID,
-			Backend: s.opts.NetworkPolicyAdapter.Name(),
-			Default: s.opts.NetworkPolicy.Default,
+			Event:        NetworkEventPolicyApplyFailed,
+			EnvID:        envID,
+			Backend:      s.opts.NetworkPolicyAdapter.Name(),
+			Default:      s.opts.NetworkPolicy.Default,
 			AllowDomains: append([]string(nil), s.opts.NetworkPolicy.AllowDomains...),
 			BlockedCIDRs: s.opts.NetworkPolicy.BlockedCIDRs(),
 			BlockedHosts: s.opts.NetworkPolicy.BlockedHosts(),
-			Error: err.Error(),
+			Error:        err.Error(),
 		})
 		return err
 	}
 
 	_ = s.writeNetworkEvent(NetworkEvent{
-		Event: NetworkEventPolicyApplied,
-		EnvID: envID,
-		Backend: s.opts.NetworkPolicyAdapter.Name(),
-		Default: s.opts.NetworkPolicy.Default,
+		Event:        NetworkEventPolicyApplied,
+		EnvID:        envID,
+		Backend:      s.opts.NetworkPolicyAdapter.Name(),
+		Default:      s.opts.NetworkPolicy.Default,
 		AllowDomains: append([]string(nil), s.opts.NetworkPolicy.AllowDomains...),
 		BlockedCIDRs: s.opts.NetworkPolicy.BlockedCIDRs(),
 		BlockedHosts: s.opts.NetworkPolicy.BlockedHosts(),
