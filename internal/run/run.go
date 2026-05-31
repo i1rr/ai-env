@@ -95,6 +95,7 @@ var runFileNames = []string{
 	"filesystem-events.jsonl",
 	"network-events.jsonl",
 	"policy-decisions.jsonl",
+	"mcp-calls.jsonl",
 	"git-diff.patch",
 	"secret-scan.json",
 	"dependency-report.json",

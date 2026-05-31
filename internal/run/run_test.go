@@ -175,6 +175,7 @@ func TestCreateRunDirectory_LayoutMatchesPlan(t *testing.T) {
 		"filesystem-events.jsonl",
 		"network-events.jsonl",
 		"policy-decisions.jsonl",
+		"mcp-calls.jsonl",
 		"git-diff.patch",
 		"secret-scan.json",
 		"dependency-report.json",

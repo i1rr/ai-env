@@ -78,7 +78,7 @@ servers:
 5. [x] Implement current-repo-only GitHub scope enforcement:
    - Reject operations on any repo other than the current one.
 6. [x] Implement `ai-env mcp list`, `ai-env mcp add <server>`, `ai-env mcp pin <server>`, `ai-env mcp scan <server>`, `ai-env mcp remove <server>`.
-7. Add `mcp-calls.jsonl` to run directory layout.
+7. [x] Add `mcp-calls.jsonl` to run directory layout.
 8. Write `docs/mcp-security.md`: MCP risks, gateway model, server registration.
 9. Add acceptance tests:
    - Unknown MCP server is blocked.
