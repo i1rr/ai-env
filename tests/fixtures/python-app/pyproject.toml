@@ -1,0 +1,23 @@
+# Minimal pyproject.toml for the Python fixture used by ai-env
+# acceptance tests. The build system is intentionally setuptools so the
+# fixture works with a stock Python install and no extra tooling. There
+# are no runtime dependencies so the tree is committable and reproducible
+# without a virtualenv or lockfile.
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ai-env-fixture-python-app"
+version = "0.1.0"
+description = "Minimal Python fixture used by ai-env acceptance tests."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+dependencies = []
+
+[project.scripts]
+ai-env-fixture-python-app = "main:main"
+
+[tool.setuptools]
+py-modules = ["main"]

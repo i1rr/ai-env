@@ -1,0 +1,4 @@
+# Intentionally empty: the Python fixture has no runtime dependencies
+# so acceptance tests can exercise it inside a sandbox with no network
+# access. The file itself exists so the language detector sees the
+# canonical Python-project marker alongside pyproject.toml.

@@ -1,0 +1,15 @@
+{
+  "name": "ai-env-fixture-node-app",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Minimal Node.js fixture used by ai-env acceptance tests. Intentionally has no runtime dependencies so the tree is committable and reproducible without a node_modules/ folder.",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "test": "node test.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT"
+}
