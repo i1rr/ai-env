@@ -73,9 +73,9 @@ servers:
    - Apply scope constraints (filesystem root, GitHub repo, etc.).
    - Log all calls to `mcp-calls.jsonl`.
    - Return policy decision (allow/deny/warn).
-4. Implement workspace-only filesystem scope enforcement:
+4. [x] Implement workspace-only filesystem scope enforcement:
    - Reject any path outside `.ai-env/workspaces/<env-name>/`.
-5. Implement current-repo-only GitHub scope enforcement:
+5. [x] Implement current-repo-only GitHub scope enforcement:
    - Reject operations on any repo other than the current one.
 6. Implement `ai-env mcp list`, `ai-env mcp add <server>`, `ai-env mcp pin <server>`, `ai-env mcp scan <server>`, `ai-env mcp remove <server>`.
 7. Add `mcp-calls.jsonl` to run directory layout.
