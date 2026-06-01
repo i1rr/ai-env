@@ -188,6 +188,22 @@ type MCPCallRecord struct {
 	// MCPCallStageCall so an auditor can see at a glance which
 	// enforcers participated in the decision.
 	ScopeKinds []string `json:"scope_kinds,omitempty"`
+
+	// TurnID is the supervisor-minted turn identifier in effect at the
+	// moment the gateway reached this verdict (Plan Batch 3.3 — Turn-ID
+	// flows). The bridge that wires the gateway into a live run
+	// consults the per-run control socket's CurrentTurnID(role) before
+	// forwarding the record here and stamps the result so an auditor
+	// reading mcp-calls.jsonl can correlate each MCP decision against
+	// the agent turn recorded in transcript.jsonl /
+	// policy-decisions.jsonl. Empty when no turn source is wired (CLI
+	// dry-runs via `ai-env mcp scan`, unit tests, or the early plan-09
+	// batches that predate the field) or when the agent has not yet
+	// called BeginTurn for this run; readers treat an empty TurnID as
+	// "unknown" rather than as a missing field. Plan §0 documents the
+	// "best-effort under non-compromised agent" caveat: a compromised
+	// agent that skips BeginTurn will leave this empty.
+	TurnID string `json:"turn_id,omitempty"`
 }
 
 // MCPCallsWriter appends MCPCallRecord values to mcp-calls.jsonl.

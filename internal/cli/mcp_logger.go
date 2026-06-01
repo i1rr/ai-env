@@ -52,6 +52,87 @@ type MCPCallLogger struct {
 	// nil writer rather than substituting a no-op so a misconfigured
 	// caller fails loudly.
 	writer *run.MCPCallsWriter
+
+	// turnSource, when non-nil, is the per-run turn-id source the
+	// bridge consults at log time to stamp MCPCallRecord.TurnID. Wired
+	// by BuildRunGateway from the supervisor's ControlSocket so every
+	// gateway decision lands the same turn id the transcript writer
+	// (Plan §0 / Plan §7) sees. Nil for dry-run / unit-test bridges
+	// that have no control socket; in that case TurnID stays empty,
+	// which readers treat as "unknown" per the field doc.
+	turnSource TurnSource
+
+	// turnRole names the per-role counter the bridge reads from
+	// turnSource. Defaults to DefaultTurnRole when empty so the legacy
+	// per-run callers do not have to thread the role through every
+	// call. Non-empty matches the role string the supervisor passed to
+	// BeginTurn (the control socket isolates counters per role so
+	// multi-agent runs do not collide on a single sequence).
+	turnRole string
+}
+
+// DefaultTurnRole is the default role string the gateway bridge passes
+// to TurnSource.CurrentTurnID when MCPCallLoggerOptions.TurnRole is
+// empty. Matches the control socket's default role on the BeginTurn /
+// CurrentTurn handlers (run.ControlSocket): the empty string is
+// rewritten to "agent" on the socket side, and the bridge mirrors the
+// convention so both ends of the bridge see the same counter family.
+// Exported so the supervisor wiring site can override it explicitly
+// without retyping the literal.
+const DefaultTurnRole = "agent"
+
+// TurnSource is the supervisor-side accessor MCPCallLogger consults to
+// stamp a turn id on every record. *run.ControlSocket satisfies the
+// interface via its CurrentTurnID method (Plan Batch 3.3 — Turn-ID
+// flows); a test fake can substitute a closure that returns canned
+// values.
+//
+// Implementations:
+//
+//   - must be safe for concurrent CurrentTurnID calls (the bridge is
+//     called from gateway goroutines servicing parallel tool calls);
+//   - must return "" when no turn has been allocated yet for the
+//     requested role — the bridge interprets the empty string as
+//     "no turn id available" and leaves MCPCallRecord.TurnID empty;
+//   - must never panic on an unknown role: the bridge passes whatever
+//     MCPCallLoggerOptions.TurnRole the caller supplied, and a typo
+//     should yield an empty result, not a runtime failure.
+type TurnSource interface {
+	// CurrentTurnID returns the most recent turn id allocated for the
+	// supplied role. Empty when no turn has started yet. The bridge
+	// uses this value to stamp MCPCallRecord.TurnID at log time.
+	CurrentTurnID(role string) string
+}
+
+// TurnSourceFunc is a function adapter so callers can pass a closure
+// where a TurnSource is required (mirrors http.HandlerFunc / the
+// existing ShellEvaluatorFunc on the control socket).
+type TurnSourceFunc func(role string) string
+
+// CurrentTurnID implements TurnSource by forwarding to the underlying
+// function.
+func (f TurnSourceFunc) CurrentTurnID(role string) string {
+	return f(role)
+}
+
+// MCPCallLoggerOptions bundles the optional construction inputs the
+// bridge consumes. Pass nil to NewMCPCallLogger for the legacy "writer-
+// only, no turn stamping" behavior; pass a populated value to wire the
+// turn-id source (Plan Batch 3.3).
+type MCPCallLoggerOptions struct {
+	// TurnSource is the per-run accessor the bridge consults at log
+	// time to stamp MCPCallRecord.TurnID. Nil leaves TurnID empty on
+	// every record (the legacy plan-09 behavior); the supervisor's
+	// BuildRunGateway wires *run.ControlSocket here once Plan Batch
+	// 3.3 lands.
+	TurnSource TurnSource
+
+	// TurnRole is the role string the bridge passes to
+	// TurnSource.CurrentTurnID. Empty falls back to DefaultTurnRole so
+	// the production path does not have to repeat the literal. Test
+	// fixtures that drive a custom role (e.g. "subagent") set this
+	// explicitly.
+	TurnRole string
 }
 
 // NewMCPCallLogger wraps writer in a bridge that satisfies
@@ -66,10 +147,36 @@ type MCPCallLogger struct {
 // pattern (the supervisor owns the file handles; helpers receive the
 // writer by reference).
 func NewMCPCallLogger(writer *run.MCPCallsWriter) (*MCPCallLogger, error) {
+	return NewMCPCallLoggerWithOptions(writer, nil)
+}
+
+// NewMCPCallLoggerWithOptions is the Plan Batch 3.3 entry point: it
+// constructs a bridge wired with an optional TurnSource so every Log
+// call stamps the current turn id on the on-disk MCPCallRecord. The
+// supervisor's BuildRunGateway calls this constructor with the
+// run-scoped *run.ControlSocket as the TurnSource; legacy / unit-test
+// callers continue to call NewMCPCallLogger (opts == nil) and see the
+// pre-3.3 behavior (TurnID stays empty).
+//
+// writer must be non-nil; passing a nil writer is a programming error
+// regardless of whether opts is supplied. opts may be nil to mean "no
+// turn stamping, default role" (identical to NewMCPCallLogger).
+//
+// The bridge does not take ownership of writer's lifetime: the caller
+// is responsible for calling writer.Close in the post-run drain, same
+// as NewMCPCallLogger.
+func NewMCPCallLoggerWithOptions(writer *run.MCPCallsWriter, opts *MCPCallLoggerOptions) (*MCPCallLogger, error) {
 	if writer == nil {
 		return nil, errors.New("cli: NewMCPCallLogger requires a non-nil writer")
 	}
-	return &MCPCallLogger{writer: writer}, nil
+	logger := &MCPCallLogger{writer: writer, turnRole: DefaultTurnRole}
+	if opts != nil {
+		logger.turnSource = opts.TurnSource
+		if opts.TurnRole != "" {
+			logger.turnRole = opts.TurnRole
+		}
+	}
+	return logger, nil
 }
 
 // Log implements mcp.CallLogger by translating rec into the on-disk
@@ -93,6 +200,22 @@ func NewMCPCallLogger(writer *run.MCPCallsWriter) (*MCPCallLogger, error) {
 // gateway surfaces this to the supervisor so a missing audit trail
 // can abort the run rather than continue silently.
 func (l *MCPCallLogger) Log(rec mcp.CallRecord) error {
+	// Plan Batch 3.3 (Turn-ID flows): when a TurnSource is wired the
+	// bridge stamps the supervisor-minted turn id onto the record at
+	// log time. The gateway itself is turn-unaware (it would otherwise
+	// have to import a run-package handle); the bridge owns the
+	// correlation because it already owns the run-scoped translation.
+	//
+	// Precedence: a caller that pre-populated rec.TurnID (e.g. an MCP
+	// helper that received a turn id on its own RPC and forwarded it
+	// via the GatewayRequest) wins. The fallback consults the
+	// per-bridge TurnSource against the per-bridge Role; an empty
+	// result leaves rec.TurnID empty so an auditor reading the file
+	// can distinguish "no turn yet" from "turn unknown".
+	turnID := rec.TurnID
+	if turnID == "" && l.turnSource != nil {
+		turnID = l.turnSource.CurrentTurnID(l.turnRole)
+	}
 	return l.writer.Write(run.MCPCallRecord{
 		Timestamp:    rec.Timestamp,
 		Stage:        string(rec.Stage),
@@ -108,6 +231,7 @@ func (l *MCPCallLogger) Log(rec mcp.CallRecord) error {
 		Repo:         rec.Repo,
 		Operation:    rec.Operation,
 		ScopeKinds:   rec.ScopeKinds,
+		TurnID:       turnID,
 	})
 }
 

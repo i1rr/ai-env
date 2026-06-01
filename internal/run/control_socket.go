@@ -774,6 +774,58 @@ func (s *ControlSocket) handleHello(req controlSocketRequest, enc *json.Encoder)
 	return true
 }
 
+// AllocateTurnID is the in-process counterpart of the RPC BeginTurn
+// handler. It mints a fresh monotonic turn id for the given role,
+// records it as the role's current turn, and returns it. The
+// supervisor uses this when it needs to begin a turn from Go code
+// (e.g. the transcript writer's pre-launch wiring) without
+// round-tripping through the socket; the RPC handler itself
+// (handleBeginTurn) delegates to the same bookkeeping via
+// CurrentTurnID for the read side.
+//
+// An empty role is rewritten to "agent" so the in-process accessor
+// agrees with the RPC handler's default role handling
+// (handleBeginTurn / handleCurrentTurn).
+//
+// The method is safe for concurrent use: it takes the same turnsMu
+// the RPC handlers do.
+func (s *ControlSocket) AllocateTurnID(role string) string {
+	if role == "" {
+		role = "agent"
+	}
+	s.turnsMu.Lock()
+	defer s.turnsMu.Unlock()
+	s.turnCounter[role]++
+	n := s.turnCounter[role]
+	id := fmt.Sprintf("t-%s-%d", role, n)
+	s.currentTurns[role] = id
+	return id
+}
+
+// CurrentTurnID returns the most recent turn id allocated for the
+// given role over the JSON-RPC BeginTurn surface, or the empty string
+// when no BeginTurn has been called for that role yet. It is the
+// supervisor-side, in-process accessor the Plan Batch 3.3 turn-id
+// bridge (cli.MCPCallLogger via cli.TurnSource) consults to stamp
+// MCPCallRecord.TurnID without round-tripping through the socket
+// itself.
+//
+// An empty role is rewritten to "agent" so the in-process accessor
+// agrees with the RPC handler's default role handling
+// (handleBeginTurn / handleCurrentTurn). This keeps the bridge and
+// the wire surface returning identical answers for the same caller.
+//
+// The method is safe for concurrent use: it takes the same turnsMu
+// the RPC handlers do.
+func (s *ControlSocket) CurrentTurnID(role string) string {
+	if role == "" {
+		role = "agent"
+	}
+	s.turnsMu.Lock()
+	defer s.turnsMu.Unlock()
+	return s.currentTurns[role]
+}
+
 // handleBeginTurn allocates a new monotonic turn ID for the given
 // role and returns it. The plan does not enforce a particular
 // numbering scheme; we use "t-<role>-<n>" so the on-disk transcript

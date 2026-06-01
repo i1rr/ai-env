@@ -742,3 +742,100 @@ func TestControlSocket_NewControlSocketValidation(t *testing.T) {
 		t.Errorf("NewControlSocket with empty RunDir: want error, got nil")
 	}
 }
+
+// TestControlSocket_AllocateAndCurrentTurnIDInProcess covers Plan
+// Batch 3.3's in-process turn-id surface. AllocateTurnID mints a
+// fresh monotonic id per role; CurrentTurnID returns the most recent
+// one. The two methods are the supervisor-side bypass of the RPC
+// handler used by the gateway turn-id bridge (cli.MCPCallLogger).
+func TestControlSocket_AllocateAndCurrentTurnIDInProcess(t *testing.T) {
+	cs, err := NewControlSocket(ControlSocketOptions{
+		RunDir:       t.TempDir(),
+		PrimaryToken: "tok",
+	})
+	if err != nil {
+		t.Fatalf("NewControlSocket: %v", err)
+	}
+
+	// No allocation yet: every role reports the empty string.
+	if got := cs.CurrentTurnID("agent"); got != "" {
+		t.Errorf("CurrentTurnID before alloc: got %q, want empty", got)
+	}
+	if got := cs.CurrentTurnID(""); got != "" {
+		t.Errorf("CurrentTurnID empty role before alloc: got %q, want empty", got)
+	}
+
+	// Allocate a sequence under the default ("agent") and a custom
+	// ("subagent") role; the counters must be independent.
+	a1 := cs.AllocateTurnID("agent")
+	a2 := cs.AllocateTurnID("agent")
+	s1 := cs.AllocateTurnID("subagent")
+	if a1 == "" || a2 == "" || s1 == "" {
+		t.Fatalf("AllocateTurnID produced empty id (a1=%q a2=%q s1=%q)", a1, a2, s1)
+	}
+	if a1 == a2 {
+		t.Errorf("AllocateTurnID(agent) twice returned identical ids %q", a1)
+	}
+	if a1 == s1 || a2 == s1 {
+		t.Errorf("counter cross-talk: agent and subagent share an id (a1=%q a2=%q s1=%q)", a1, a2, s1)
+	}
+
+	if got := cs.CurrentTurnID("agent"); got != a2 {
+		t.Errorf("CurrentTurnID(agent) = %q, want %q (most recent)", got, a2)
+	}
+	if got := cs.CurrentTurnID("subagent"); got != s1 {
+		t.Errorf("CurrentTurnID(subagent) = %q, want %q", got, s1)
+	}
+
+	// Empty role on AllocateTurnID is rewritten to "agent" so the
+	// in-process accessor agrees with the RPC handler.
+	a3 := cs.AllocateTurnID("")
+	if a3 == "" {
+		t.Errorf("AllocateTurnID(empty) returned empty")
+	}
+	if got := cs.CurrentTurnID(""); got != a3 {
+		t.Errorf("CurrentTurnID(empty) = %q, want %q (default role)", got, a3)
+	}
+	if got := cs.CurrentTurnID("agent"); got != a3 {
+		t.Errorf("after AllocateTurnID(empty), CurrentTurnID(agent) = %q, want %q (shared default role)", got, a3)
+	}
+}
+
+// TestControlSocket_RPCAndInProcessTurnIDAgree pins the contract that
+// the in-process AllocateTurnID counter and the RPC BeginTurn counter
+// share the same per-role state — i.e. the bridge that reads
+// CurrentTurnID sees turns allocated via the RPC and vice versa.
+func TestControlSocket_RPCAndInProcessTurnIDAgree(t *testing.T) {
+	dir := newControlSocketRunDir(t)
+	cs, _ := startControlSocket(t, dir, ControlSocketOptions{PrimaryToken: "tok"})
+
+	// Allocate via RPC first.
+	conn, br, resp := dialAndHello(t, cs, "tok", controlSocketProtocolVersion)
+	defer conn.Close()
+	if resp.Decision != "allow" {
+		t.Fatalf("Hello: Decision = %q", resp.Decision)
+	}
+	r := sendRequest(t, conn, br, "BeginTurn", beginTurnParams{
+		ControlToken: "tok", Role: "agent",
+	})
+	if r.TurnID == "" {
+		t.Fatalf("BeginTurn produced empty id")
+	}
+	// In-process reader sees the same id.
+	if got := cs.CurrentTurnID("agent"); got != r.TurnID {
+		t.Errorf("in-process CurrentTurnID after RPC BeginTurn: got %q, want %q", got, r.TurnID)
+	}
+
+	// Allocate via in-process; the RPC CurrentTurn handler reports
+	// the new id.
+	a := cs.AllocateTurnID("agent")
+	if a == "" || a == r.TurnID {
+		t.Fatalf("AllocateTurnID after RPC BeginTurn: got %q (previous %q)", a, r.TurnID)
+	}
+	c := sendRequest(t, conn, br, "CurrentTurn", currentTurnParams{
+		ControlToken: "tok", Role: "agent",
+	})
+	if c.TurnID != a {
+		t.Errorf("RPC CurrentTurn after in-process AllocateTurnID: got %q, want %q", c.TurnID, a)
+	}
+}

@@ -176,7 +176,7 @@ All five per-subsystem streams stay as **source of truth**. `leaks.jsonl` is the
 
 ### Section 3 — Bucket 4: MCP gateway live
 
-**Batch 3.1 — `BuildRunGateway`** — as iter-3.
+**Batch 3.1 — `BuildRunGateway`** [x] — as iter-3.
 
 **Batch 3.2 — Per-run MCP config + per-server tokens + workspace shadowing**
 - Write `<runDir>/mcp-servers.json` shape:
@@ -196,7 +196,7 @@ All five per-subsystem streams stay as **source of truth**. `leaks.jsonl` is the
   - `TestMCPGateway_PrimaryTokenNotInAgentEnv`.
   - `TestSupervisor_WorkspaceMCPConfigNeutralized` — `.mcp.json` present pre-run; renamed at Create; restored at Destroy.
 
-**Batch 3.3 — Turn-ID flows** — as iter-3.
+**Batch 3.3 — Turn-ID flows** [x] — as iter-3.
 
 **Batch 3.4 — Gateway secret detector (per-direction, JSON-aware, streaming)**
 - Request: gateway scans body via `scanners.builtinPatterns()`. Match → block + `gateway_secret_blocked` + redact in **all payload-derived CallRecord fields** (enumerated list: `Reason, Path, Operation, Repo, ResolvedPath, Snippet, Args`).

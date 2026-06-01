@@ -349,6 +349,23 @@ type CallRecord struct {
 	// CallStageCall so an auditor can see at a glance which
 	// enforcers participated in the decision.
 	ScopeKinds []string `json:"scope_kinds,omitempty"`
+
+	// TurnID is the supervisor-minted turn identifier in effect at the
+	// moment the gateway reached this verdict. Populated by the bridge
+	// that wires the gateway into a live run (see plan Batch 3.3 —
+	// Turn-ID flows): the bridge consults the per-run control socket's
+	// CurrentTurnID(role) before forwarding the record to the on-disk
+	// MCPCallsWriter and stamps the result here so an auditor reading
+	// mcp-calls.jsonl can join each MCP decision to the same agent turn
+	// recorded in transcript.jsonl / policy-decisions.jsonl. Empty when
+	// no turn source is wired (CLI dry-runs via `ai-env mcp scan`, the
+	// unit tests for the gateway itself, the early plan-09 batches that
+	// predate this field) or when the agent has not yet called
+	// BeginTurn for this run; readers must treat an empty TurnID as
+	// "unknown" rather than as a missing field. Plan §0 documents the
+	// "best-effort under non-compromised agent" caveat: a compromised
+	// agent that skips BeginTurn will leave this empty.
+	TurnID string `json:"turn_id,omitempty"`
 }
 
 // CallLogger is the gateway-side interface step 7's
