@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/rivan1986/ai-env/internal/backend"
@@ -1437,6 +1438,15 @@ func (s *Supervisor) launchChildHost() error {
 	cmd.Env = s.opts.Command.Env
 	cmd.Stdout = s.streams.Stdout()
 	cmd.Stderr = s.streams.Stderr()
+	// Run the child in its own process group on POSIX so the kill
+	// path can signal the full subtree (shell + grandchildren) and not
+	// just the direct child. Without this, a `sh -c "long-cmd"` wrapper
+	// that fork+execs the inner command leaves the inner command alive
+	// after the shell receives the kill: the inner command keeps the
+	// supervisor's stdout pipe open and cmd.Wait blocks until it exits
+	// naturally. windows builds get a no-op via applyProcessGroup and
+	// the kill path degrades to per-pid delivery.
+	applyProcessGroup(cmd)
 	// Host fallback: only forward Stdin when the caller explicitly wired
 	// one. The legacy behavior was nil (child reads from /dev/null) and
 	// the existing plan-03 tests rely on it; an opt-in stdin reader keeps
@@ -2082,8 +2092,11 @@ func (s *Supervisor) stopChildGracefully() {
 		return
 	}
 	// SIGINT is the polite ask. signalInterrupt is the platform-
-	// specific Signal value; on POSIX it is os.Interrupt.
-	_ = signalChild(c, signalInterrupt)
+	// specific Signal value; on POSIX it is os.Interrupt. We deliver
+	// it to the whole process group via signalChildGroup so a shell
+	// wrapper's grandchildren also receive it; the launchChildHost
+	// path puts the child in its own group via applyProcessGroup.
+	_ = signalChildGroup(c, signalInterrupt)
 	// Wait the grace window for the child to exit. If it does, the
 	// childDone channel closes and we exit promptly. If it does not,
 	// we escalate to a hard kill (the waiter goroutine still reaps
@@ -2120,7 +2133,12 @@ func (s *Supervisor) hardKillChild() {
 	if c == nil || c.Process == nil {
 		return
 	}
-	_ = c.Process.Kill()
+	// Group-aware SIGKILL: deliver to every member of the child's
+	// process group so any grandchildren the shell wrapper spawned
+	// die alongside the direct child. signalChildGroup falls back to
+	// per-pid c.Process.Signal when the group call fails, which is
+	// equivalent to the legacy c.Process.Kill behaviour.
+	_ = signalChildGroup(c, syscall.SIGKILL)
 }
 
 // requestBackendStop invokes Backend.Stop at most once per run. The
