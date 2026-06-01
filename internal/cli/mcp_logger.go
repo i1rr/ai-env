@@ -232,6 +232,14 @@ func (l *MCPCallLogger) Log(rec mcp.CallRecord) error {
 		Operation:    rec.Operation,
 		ScopeKinds:   rec.ScopeKinds,
 		TurnID:       turnID,
+		// Plan Batch 3.4 — payload-derived fields. The gateway-side
+		// secret detector populates these from the agent-supplied body
+		// (already redacted when a secret was matched) so the on-disk
+		// audit record carries the structural shape without the leaked
+		// value.
+		ResolvedPath: rec.ResolvedPath,
+		Snippet:      rec.Snippet,
+		Args:         rec.Args,
 	})
 }
 

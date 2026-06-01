@@ -204,6 +204,30 @@ type MCPCallRecord struct {
 	// "best-effort under non-compromised agent" caveat: a compromised
 	// agent that skips BeginTurn will leave this empty.
 	TurnID string `json:"turn_id,omitempty"`
+
+	// ResolvedPath is the canonical / normalized filesystem path the
+	// gateway derived from Path. Plan Batch 3.4 enumerates this as one
+	// of the payload-derived CallRecord fields the request-direction
+	// secret detector must redact when blocking a body that carries a
+	// matched secret pattern.
+	ResolvedPath string `json:"resolved_path,omitempty"`
+
+	// Snippet is a short captured byte fragment showing the context
+	// that triggered the gateway-side decision. Plan Batch 3.4
+	// enumerates this as one of the payload-derived CallRecord fields
+	// the request-direction secret detector must redact. The on-disk
+	// value is the post-redaction string when a secret was detected;
+	// raw secrets never reach the audit log.
+	Snippet string `json:"snippet,omitempty"`
+
+	// Args is the agent-supplied tool-call arguments blob the gateway
+	// forwarded to the enforcer (typically the JSON-RPC "arguments"
+	// member of a tools/call request, stringified for the audit log).
+	// Plan Batch 3.4 enumerates Args as the highest-risk payload-
+	// derived CallRecord field: the request-direction secret detector
+	// scans the body and on match rewrites Args to the sentinel
+	// before the record is logged.
+	Args string `json:"args,omitempty"`
 }
 
 // MCPCallsWriter appends MCPCallRecord values to mcp-calls.jsonl.

@@ -391,6 +391,173 @@ func TestGatewayMCPAuthorizer_MalformedBodyBlocked(t *testing.T) {
 	}
 }
 
+// TestMCPGateway_AllPayloadFieldsRedacted is the Plan Batch 3.4
+// acceptance test: an MCP request whose JSON-RPC body contains a
+// secret is blocked by the gateway's per-direction detector, a
+// `gateway_secret_blocked` lifecycle verb is emitted, and every
+// payload-derived field on the on-disk MCPCallRecord (Reason, Path,
+// Operation, Repo, ResolvedPath, Snippet, Args) is rewritten to the
+// redaction sentinel before the record is logged.
+//
+// The test drives the GatewayMCPAuthorizer directly (the same adapter
+// the control socket's AuthorizeMCPCall handler forwards to) so the
+// full block path is exercised end-to-end. The body carries a
+// canonical Anthropic key (sk-ant-...) embedded inside the
+// "arguments" field of a tools/call payload — the highest-risk
+// exfiltration vector per the plan.
+func TestMCPGateway_AllPayloadFieldsRedacted(t *testing.T) {
+	registry := newTestRegistry(t)
+
+	// Capture every CallRecord the authorizer's blocked-call logger
+	// receives so we can assert on the redacted on-disk shape. A
+	// custom CallLogger is the right test surface because it sees
+	// exactly the record the production MCPCallLogger would forward
+	// to the run-scoped MCPCallsWriter, without the I/O.
+	var logged []mcp.CallRecord
+	logger := mcp.CallLoggerFunc(func(rec mcp.CallRecord) error {
+		logged = append(logged, rec)
+		return nil
+	})
+
+	gw, err := mcp.NewGateway(registry, &mcp.GatewayOptions{
+		Logger: logger,
+	})
+	if err != nil {
+		t.Fatalf("NewGateway: %v", err)
+	}
+
+	// Capture lifecycle verbs so the test can assert that
+	// `gateway_secret_blocked` is emitted with the canonical metadata
+	// keys (server / operation / pattern / finding_id).
+	var emitted []emittedVerb
+	sink := func(verb run.LifecycleVerb, metadata map[string]string) error {
+		emitted = append(emitted, emittedVerb{verb: verb, metadata: metadata})
+		return nil
+	}
+
+	authz, err := NewGatewayMCPAuthorizerWithOptions(gw, &GatewayMCPAuthorizerOptions{
+		BlockedLogger: logger,
+		EventSink:     sink,
+		Now: func() time.Time {
+			return time.Date(2026, 6, 1, 12, 34, 56, 0, time.UTC)
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewGatewayMCPAuthorizerWithOptions: %v", err)
+	}
+
+	// Build a tools/call body whose payload carries a secret across
+	// MULTIPLE payload-derived fields. The plan's enumeration covers
+	// Reason / Path / Operation / Repo / ResolvedPath / Snippet /
+	// Args; the body sits in args, plus we set path / repo /
+	// operation so the test can verify each field is independently
+	// redacted on the on-disk record.
+	secret := "sk-ant-AABBCCDDEEFFGGHHIIJJKKLLMM"
+	body, _ := json.Marshal(map[string]any{
+		"tool":      "read_file",
+		"path":      "/workspace/secret-" + secret + ".txt",
+		"repo":      "owner/repo-with-" + secret,
+		"operation": "write-" + secret,
+		"args": map[string]any{
+			"file_contents": "ANTHROPIC_KEY=" + secret,
+		},
+	})
+
+	resp := authz.Authorize("filesystem", "tools/call", body)
+
+	// 1. Decision must be block.
+	if resp.Decision != "block" {
+		t.Fatalf("decision = %q, want block", resp.Decision)
+	}
+	// Reason must reference the matched pattern by name and must
+	// NOT carry the raw secret. The synthesized Reason text itself
+	// does not embed a redactable substring (the block handler
+	// references only the pattern name), so the absence of the
+	// sentinel here is acceptable — the on-disk Path / Args fields
+	// carry the sentinel where the secret-derived data landed.
+	if strings.Contains(resp.Reason, secret) {
+		t.Errorf("response Reason leaked the raw secret: %q", resp.Reason)
+	}
+	if !strings.Contains(resp.Reason, "Anthropic") {
+		t.Errorf("response Reason should reference matched pattern name: %q", resp.Reason)
+	}
+
+	// 2. One CallRecord landed on the blocked-call logger.
+	if len(logged) != 1 {
+		t.Fatalf("expected 1 CallRecord, got %d", len(logged))
+	}
+	rec := logged[0]
+
+	// 3. Every payload-derived field on the record must NOT carry
+	//    the raw secret (Plan Batch 3.4 closes the enumeration:
+	//    Reason / Path / Operation / Repo / ResolvedPath / Snippet
+	//    / Args). Fields that sourced from a secret-carrying body
+	//    fragment (Path, Repo, Operation, ResolvedPath, Args) must
+	//    additionally contain the sentinel; Reason and Snippet are
+	//    synthesized by the block handler and only carry the
+	//    sentinel when the block handler's text itself embeds a
+	//    redactable substring — but they MUST still be passed
+	//    through the redactor (defense-in-depth) so a future
+	//    addition that lets a secret leak into a synthesized field
+	//    is caught.
+	payloadFields := map[string]string{
+		"Reason":       rec.Reason,
+		"Path":         rec.Path,
+		"Operation":    rec.Operation,
+		"Repo":         rec.Repo,
+		"ResolvedPath": rec.ResolvedPath,
+		"Snippet":      rec.Snippet,
+		"Args":         rec.Args,
+	}
+	// Fields sourced from body fragments that DO carry the secret;
+	// these must contain the sentinel after redaction.
+	sentinelRequired := map[string]bool{
+		"Path":         true,
+		"Operation":    true,
+		"Repo":         true,
+		"ResolvedPath": true,
+		"Args":         true,
+	}
+	for name, value := range payloadFields {
+		if value == "" {
+			t.Errorf("payload-derived field %s is empty; want redacted value", name)
+			continue
+		}
+		if strings.Contains(value, secret) {
+			t.Errorf("payload-derived field %s leaked the raw secret: %q", name, value)
+		}
+		if sentinelRequired[name] && !strings.Contains(value, "[REDACTED") {
+			t.Errorf("payload-derived field %s missing sentinel: %q", name, value)
+		}
+	}
+
+	// 4. Stage is "call" (not "launch") and Decision is "block".
+	if rec.Stage != mcp.CallStageCall {
+		t.Errorf("Stage = %q, want %q", rec.Stage, mcp.CallStageCall)
+	}
+	if rec.Decision != "block" {
+		t.Errorf("Decision = %q, want block", rec.Decision)
+	}
+
+	// 5. Lifecycle verb emitted with the canonical metadata keys.
+	if len(emitted) != 1 {
+		t.Fatalf("expected 1 lifecycle verb, got %d", len(emitted))
+	}
+	if emitted[0].verb != run.LifecycleVerbGatewaySecretBlocked {
+		t.Errorf("verb = %q, want %q", emitted[0].verb, run.LifecycleVerbGatewaySecretBlocked)
+	}
+	for _, key := range []string{"server", "operation", "pattern", "finding_id"} {
+		if emitted[0].metadata[key] == "" {
+			t.Errorf("metadata missing required key %q", key)
+		}
+	}
+	// The pattern name in the metadata must match a known built-in
+	// rule (the matched Anthropic prefix).
+	if !strings.Contains(emitted[0].metadata["pattern"], "Anthropic") {
+		t.Errorf("metadata pattern = %q, want Anthropic-related match", emitted[0].metadata["pattern"])
+	}
+}
+
 // --- helpers ----------------------------------------------------------------
 
 // emittedVerb records one lifecycle verb the materializer emitted

@@ -366,6 +366,36 @@ type CallRecord struct {
 	// "best-effort under non-compromised agent" caveat: a compromised
 	// agent that skips BeginTurn will leave this empty.
 	TurnID string `json:"turn_id,omitempty"`
+
+	// ResolvedPath is the canonical / normalized filesystem path the
+	// gateway derived from Path (e.g. after symlink resolution or
+	// workspace-root rebasing). Plan Batch 3.4 enumerates ResolvedPath
+	// as one of the payload-derived CallRecord fields the request-
+	// direction secret detector must redact when blocking a body that
+	// contains a matched secret pattern. Empty for records that did
+	// not resolve a path; readers treat empty as "not applicable".
+	ResolvedPath string `json:"resolved_path,omitempty"`
+
+	// Snippet is a short captured byte fragment showing the context
+	// that triggered the gateway-side decision (e.g. the matched
+	// argument or the rejected body fragment). Plan Batch 3.4
+	// enumerates Snippet as one of the payload-derived CallRecord
+	// fields the request-direction secret detector must redact: a
+	// caller that lands a Snippet containing a matched secret has the
+	// value rewritten to the sentinel before the record is logged.
+	Snippet string `json:"snippet,omitempty"`
+
+	// Args is the agent-supplied tool-call arguments blob the gateway
+	// forwarded to the enforcer (typically the JSON-RPC "arguments"
+	// member of a tools/call request, stringified for the audit log).
+	// Plan Batch 3.4 enumerates Args as the highest-risk payload-
+	// derived CallRecord field for secret detection: a secret in the
+	// raw args is the canonical exfiltration vector the gateway
+	// detector blocks. When the request-direction detector finds a
+	// match, Args is rewritten to the sentinel before the record is
+	// logged so an auditor sees the structural shape without the
+	// leaked value. Empty for non-tools/call records.
+	Args string `json:"args,omitempty"`
 }
 
 // CallLogger is the gateway-side interface step 7's
@@ -397,6 +427,19 @@ type noopCallLogger struct{}
 
 // Log implements CallLogger by discarding the record.
 func (noopCallLogger) Log(CallRecord) error { return nil }
+
+// CallLoggerFunc is a function adapter so callers can pass a closure
+// where a CallLogger is required (mirrors http.HandlerFunc / the
+// existing ShellEvaluatorFunc on the control socket). The gateway's
+// own production wiring uses the cli.MCPCallLogger bridge type
+// rather than this adapter; CallLoggerFunc is the right shape for
+// unit tests that want to capture records in a slice without
+// declaring a one-off struct.
+type CallLoggerFunc func(CallRecord) error
+
+// Log implements CallLogger by forwarding to the underlying
+// function.
+func (f CallLoggerFunc) Log(rec CallRecord) error { return f(rec) }
 
 // GatewayDecision is the gateway-facing verdict the caller acts on.
 // Distinct from CallRecord on purpose: CallRecord is the on-disk

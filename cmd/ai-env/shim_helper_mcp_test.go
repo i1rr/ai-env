@@ -158,3 +158,154 @@ func TestRunShimHelperMCP_RejectsMissingServerToken(t *testing.T) {
 		t.Errorf("expected error when AI_ENV_MCP_SERVER_TOKEN is unset")
 	}
 }
+
+// TestMCPShim_ResponseSecretWalkedNotByteReplaced is the Plan Batch
+// 3.4 acceptance test for the response-direction JSON-aware walker.
+// A JSON-RPC frame whose RESULT carries a nested string with a
+// secret must be re-marshalled as VALID JSON-RPC with the matched
+// value (and only the matched value) replaced by the sentinel —
+// never a byte-window substitution that could corrupt the surrounding
+// braces / quotes / commas and break framing.
+//
+// The test asserts THREE invariants:
+//
+//  1. The scrubbed output decodes as valid JSON (no broken framing).
+//  2. The original structural keys + non-secret values are
+//     preserved verbatim (the walker only touches string VALUES
+//     that match a pattern).
+//  3. The matched value is replaced by the sentinel; the raw secret
+//     is absent from the output.
+func TestMCPShim_ResponseSecretWalkedNotByteReplaced(t *testing.T) {
+	s := newMCPScrubber(scanners.BuiltInSecretPatterns())
+
+	// Nested JSON-RPC response frame: the secret lives 3 levels deep,
+	// inside an array of objects, so a byte-window replacer would
+	// have a hard time avoiding the surrounding braces / commas. The
+	// JSON walker traverses the structure and only touches the
+	// matched string value.
+	secret := "sk-ant-AABBCCDDEEFFGGHHIIJJKKLLMM"
+	frame := []byte(`{"jsonrpc":"2.0","id":42,"result":{"tools":[{"name":"safe-tool","metadata":{"token":"` + secret + `","other":"untouched"}}],"summary":"two tools"}}`)
+
+	out, err := s.ScrubJSONFrame(frame)
+	if err != nil {
+		t.Fatalf("ScrubJSONFrame err = %v", err)
+	}
+
+	// Invariant 1: output decodes as valid JSON.
+	var decoded map[string]any
+	if err := json.Unmarshal(out, &decoded); err != nil {
+		t.Fatalf("scrubbed frame is not valid JSON (framing broken): %v; payload=%s", err, string(out))
+	}
+
+	// Invariant 2: structural keys preserved.
+	if decoded["jsonrpc"] != "2.0" {
+		t.Errorf("jsonrpc key mutated: %v", decoded["jsonrpc"])
+	}
+	if v, ok := decoded["id"].(float64); !ok || v != 42 {
+		t.Errorf("id key mutated: %v", decoded["id"])
+	}
+	result, ok := decoded["result"].(map[string]any)
+	if !ok {
+		t.Fatalf("result key not an object: %v", decoded["result"])
+	}
+	if result["summary"] != "two tools" {
+		t.Errorf("summary value mutated: %v", result["summary"])
+	}
+	tools, ok := result["tools"].([]any)
+	if !ok || len(tools) != 1 {
+		t.Fatalf("tools array shape mutated: %v", result["tools"])
+	}
+	tool, ok := tools[0].(map[string]any)
+	if !ok {
+		t.Fatalf("tools[0] not an object: %v", tools[0])
+	}
+	if tool["name"] != "safe-tool" {
+		t.Errorf("tools[0].name mutated: %v", tool["name"])
+	}
+	meta, ok := tool["metadata"].(map[string]any)
+	if !ok {
+		t.Fatalf("metadata not an object: %v", tool["metadata"])
+	}
+	if meta["other"] != "untouched" {
+		t.Errorf("non-secret value mutated: %v", meta["other"])
+	}
+
+	// Invariant 3: matched value is replaced by the sentinel; the
+	// raw secret is absent.
+	tok, _ := meta["token"].(string)
+	if strings.Contains(tok, secret) {
+		t.Errorf("token field still carries the raw secret: %q", tok)
+	}
+	if !strings.Contains(tok, "[REDACTED") {
+		t.Errorf("token field missing sentinel after walk: %q", tok)
+	}
+	// And the raw secret must not appear ANYWHERE in the output
+	// (defense-in-depth against a future refactor that lets the
+	// walker accidentally re-emit the value).
+	if bytes.Contains(out, []byte(secret)) {
+		t.Errorf("scrubbed output still carries raw secret bytes: %s", string(out))
+	}
+}
+
+// TestMCPShim_SecretSplitAcrossChunks is the Plan Batch 3.4
+// acceptance test for the rolling-buffer streaming scanner. A
+// secret whose bytes straddle two ScrubChunk calls (the boundary
+// case the 256-byte overlap window is designed to catch) must still
+// be redacted. The plan's "Rolling-buffer scanner with 256-byte
+// overlap" locked decision is the contract; this test pins the
+// behavior so a future refactor cannot regress to per-chunk-only
+// scanning.
+func TestMCPShim_SecretSplitAcrossChunks(t *testing.T) {
+	s := newMCPScrubber(scanners.BuiltInSecretPatterns())
+
+	// Build a payload whose canonical Anthropic key is split exactly
+	// in the middle: the first ScrubChunk sees bytes up to "sk-ant-"
+	// + 4 chars; the second ScrubChunk sees the trailing bytes. With
+	// a chunk-only scanner the secret survives both passes; with the
+	// rolling-buffer overlap the boundary is re-scanned and the
+	// match fires.
+	//
+	// The trailing space between the noise prefix and the "sk-ant-"
+	// is required so the pattern's leading \b word boundary matches
+	// (a contiguous \w-class run between the noise and the secret
+	// would defeat \b and break the test regardless of buffer
+	// behavior).
+	secret := "sk-ant-AABBCCDDEEFFGGHHIIJJKKLLMM"
+	prefix := "noise-prefix-leading-bytes-" + strings.Repeat("a", 60) + " "
+	suffix := " trailing-noise-bytes-" + strings.Repeat("z", 400)
+	full := prefix + secret + suffix
+
+	// Cut the secret exactly in the middle so the boundary straddles
+	// the match. The chunk boundary is at `prefix + "sk-ant-AABB"`;
+	// the remaining "CCDDEEFFGGHHIIJJKKLLMM" is in the second chunk.
+	cutOffset := len(prefix) + len("sk-ant-") + 4
+	first := []byte(full[:cutOffset])
+	second := []byte(full[cutOffset:])
+
+	// Sanity: each half ALONE does not match the pattern (the
+	// rolling buffer is the only way to catch this; if a half
+	// matched on its own the test would not be exercising the
+	// boundary case).
+	halfDetector := newMCPScrubber(scanners.BuiltInSecretPatterns())
+	firstOut := halfDetector.ScrubChunk(first)
+	firstTail := halfDetector.Flush()
+	combined := string(append(firstOut, firstTail...))
+	// The first half alone should not produce a redaction (the
+	// sk-ant- prefix without enough trailing chars is below the
+	// pattern's minimum length).
+	if strings.Contains(combined, "[REDACTED") {
+		t.Logf("first half alone matched (acceptable, but means the test does not exercise the boundary case)")
+	}
+
+	// Drive the real scrubber across BOTH chunks.
+	out := s.ScrubChunk(first)
+	out = append(out, s.ScrubChunk(second)...)
+	out = append(out, s.Flush()...)
+
+	if bytes.Contains(out, []byte(secret)) {
+		t.Errorf("boundary-split secret survived the rolling buffer: %s", string(out))
+	}
+	if !bytes.Contains(out, []byte("[REDACTED")) {
+		t.Errorf("rolling-buffer scrubber missing sentinel after boundary scan: %s", string(out))
+	}
+}

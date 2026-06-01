@@ -198,7 +198,7 @@ All five per-subsystem streams stay as **source of truth**. `leaks.jsonl` is the
 
 **Batch 3.3 — Turn-ID flows** [x] — as iter-3.
 
-**Batch 3.4 — Gateway secret detector (per-direction, JSON-aware, streaming)**
+**Batch 3.4 — Gateway secret detector (per-direction, JSON-aware, streaming)** [x]
 - Request: gateway scans body via `scanners.builtinPatterns()`. Match → block + `gateway_secret_blocked` + redact in **all payload-derived CallRecord fields** (enumerated list: `Reason, Path, Operation, Repo, ResolvedPath, Snippet, Args`).
 - Response: helper's stdio middleware **decodes each JSON-RPC frame**, walks all string values, replaces matched values with `[REDACTED pattern=<name> len=<n>]`, re-marshals. **Rolling-buffer scanner** with 256-byte overlap ensures secrets spanning chunk boundaries are caught.
 - Acceptance:

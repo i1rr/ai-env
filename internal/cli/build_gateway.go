@@ -155,6 +155,21 @@ type BuildRunGatewayOptions struct {
 	// forwarded to mcp.GatewayOptions.Now so the two clocks stay in
 	// sync.
 	Now func() time.Time
+
+	// EventSink, when non-nil, is the lifecycle sink the per-direction
+	// gateway secret detector (Plan Batch 3.4) emits
+	// `gateway_secret_blocked` verbs through when an inbound MCP
+	// request body matches a built-in secret pattern. Typed as a
+	// function value rather than an interface so the caller can pass
+	// a closure that bridges to the supervisor's LifecycleWriter (in
+	// the run package) without an import cycle.
+	//
+	// Nil silences the verb emission, which keeps unit-test callers
+	// from having to stand up a lifecycle writer; the detector still
+	// blocks the request and writes the redacted on-disk CallRecord,
+	// so the silence affects ONLY the lifecycle.jsonl side of the
+	// audit trail.
+	EventSink func(verb run.LifecycleVerb, metadata map[string]string) error
 }
 
 // RunGateway is the per-run bundle BuildRunGateway returns. The
@@ -198,6 +213,20 @@ type RunGateway struct {
 	// GitHubEnforcer is the per-run GitHub scope enforcer. Nil when
 	// BuildRunGatewayOptions.CurrentRepo was empty.
 	GitHubEnforcer *mcp.GitHubScopeEnforcer
+
+	// Authorizer is the run.MCPAuthorizer the supervisor wires onto
+	// the control socket's AuthorizeMCPCall handler. It is the same
+	// authorizer the supervisor would otherwise build by hand from
+	// (Gateway, Logger, EventSink): centralizing the construction
+	// here means a future call site only has to consume
+	// RunGateway.Authorizer rather than re-deriving the wiring.
+	//
+	// The authorizer is wired with the per-direction secret detector
+	// (Plan Batch 3.4): every body that reaches Authorize is scanned
+	// via scanners.BuiltInSecretPatterns() and a match short-circuits
+	// to a block decision with the redacted MCPCallRecord and a
+	// `gateway_secret_blocked` lifecycle verb.
+	Authorizer *GatewayMCPAuthorizer
 }
 
 // Close releases the bundle's on-disk resources. Specifically the
@@ -315,12 +344,30 @@ func BuildRunGateway(opts BuildRunGatewayOptions) (*RunGateway, error) {
 		return nil, fmt.Errorf("cli: BuildRunGateway: build gateway: %w", err)
 	}
 
+	// Plan Batch 3.4: construct the run.MCPAuthorizer adapter wired
+	// with the per-direction secret detector. The detector's
+	// blocked-call records go to the same logger the gateway uses
+	// so secret-block and scope-block records share one stream; the
+	// lifecycle verb is emitted via the caller's EventSink (nil when
+	// the caller has not stood up a lifecycle writer, which keeps
+	// the unit-test surface clean).
+	authorizer, err := NewGatewayMCPAuthorizerWithOptions(gw, &GatewayMCPAuthorizerOptions{
+		BlockedLogger: logger,
+		EventSink:     opts.EventSink,
+		Now:           opts.Now,
+	})
+	if err != nil {
+		_ = writer.Close()
+		return nil, fmt.Errorf("cli: BuildRunGateway: build authorizer: %w", err)
+	}
+
 	return &RunGateway{
 		Gateway:            gw,
 		Writer:             writer,
 		Logger:             logger,
 		FilesystemEnforcer: fsEnforcer,
 		GitHubEnforcer:     ghEnforcer,
+		Authorizer:         authorizer,
 	}, nil
 }
 
