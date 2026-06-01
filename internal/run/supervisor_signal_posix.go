@@ -57,7 +57,7 @@ func signalChildGroup(c *exec.Cmd, sig os.Signal) error {
 	}
 	signum, ok := sig.(syscall.Signal)
 	if !ok {
-		return c.Process.Signal(sig)
+		return signalChild(c, sig)
 	}
 	// Negative pid targets the whole process group on POSIX. If the
 	// group does not exist (Setpgid was not applied or every member
@@ -66,7 +66,7 @@ func signalChildGroup(c *exec.Cmd, sig os.Signal) error {
 		// Fall back to single-pid delivery so we still send the signal
 		// somewhere when the group is gone. This is the path a child
 		// running outside a group (Setpgid skipped) hits.
-		return c.Process.Signal(sig)
+		return signalChild(c, sig)
 	}
 	return nil
 }
