@@ -266,7 +266,7 @@ Acceptance:
 
 ### Section 6 — Bucket 6: filesystem events writer [x] — as iter-3.
 
-### Section 7 — Bucket 8: transcript writer + correlation — as iter-3.
+### Section 7 — Bucket 8: transcript writer + correlation [x] — as iter-3.
 
 ### Section 8 — `leaks.jsonl` aggregator + CLI
 
