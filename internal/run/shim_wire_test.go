@@ -2,6 +2,7 @@ package run
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -345,6 +346,160 @@ func TestNewSupervisor_ShellShimCanRunEndToEnd(t *testing.T) {
 	// is fine: nothing in this test actually appended a record.
 	if _, err := os.Stat(filepath.Join(dir.Path, "shell-commands.jsonl")); err != nil {
 		t.Errorf("shell-commands.jsonl missing post-run: %v", err)
+	}
+}
+
+// TestNewSupervisor_ShellShimInstallsWrappers is the Batch 1.4 wiring
+// acceptance: NewSupervisor must materialize one wrapper script per
+// canonical ShimProgramSet entry in ShellShimDir before the run starts.
+// The wrapper count and the per-file shebang are the on-disk evidence
+// that policy.InstallShim ran; this test does not re-validate the
+// wrapper body (the policy package's own tests already pin that).
+func TestNewSupervisor_ShellShimInstallsWrappers(t *testing.T) {
+	dir := newSupervisorRunDir(t)
+	shimDir := t.TempDir()
+	eng := policy.NewEngine(validPolicyConfig())
+
+	_, err := NewSupervisor(SupervisorOptions{
+		RunDir:       dir.Path,
+		RunID:        dir.ID,
+		EnvName:      "env",
+		Backend:      "local-process",
+		Agent:        "claude",
+		Task:         "do thing",
+		Command:      CommandSpec{Program: "true", Env: []string{"PATH=/usr/bin"}},
+		PolicyEngine: eng,
+		ShellShim:    true,
+		ShellShimDir: shimDir,
+	})
+	if err != nil {
+		t.Fatalf("NewSupervisor: %v", err)
+	}
+
+	for _, p := range policy.ShimProgramSet {
+		path := filepath.Join(shimDir, string(p))
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Errorf("wrapper for %q missing in shimDir: %v", string(p), err)
+			continue
+		}
+		if info.Mode().Perm() != 0o755 {
+			t.Errorf("wrapper %q mode = %v, want 0755", path, info.Mode().Perm())
+		}
+		body, err := os.ReadFile(path)
+		if err != nil {
+			t.Errorf("read wrapper %q: %v", path, err)
+			continue
+		}
+		if !strings.HasPrefix(string(body), "#!/bin/sh\n") {
+			t.Errorf("wrapper %q missing /bin/sh shebang", path)
+		}
+		wantExec := "exec " + DefaultShimHelperCmd + " shell " + string(p) + " \"$@\""
+		if !strings.Contains(string(body), wantExec) {
+			t.Errorf("wrapper %q missing exec line %q", path, wantExec)
+		}
+	}
+}
+
+// TestNewSupervisor_ShellShim_ShimHelperCmdOverride pins the
+// ShimHelperCmd option: a caller (typically a test harness) can
+// override the in-sandbox helper invocation so the wrapper's exec
+// line points at a host-side stub. The override flows verbatim into
+// the wrapper body so the wrapper is usable end-to-end without a
+// backend.
+func TestNewSupervisor_ShellShim_ShimHelperCmdOverride(t *testing.T) {
+	dir := newSupervisorRunDir(t)
+	shimDir := t.TempDir()
+	eng := policy.NewEngine(validPolicyConfig())
+
+	override := "/tmp/fixtures/test-shim-helper --opt"
+	_, err := NewSupervisor(SupervisorOptions{
+		RunDir:        dir.Path,
+		RunID:         dir.ID,
+		EnvName:       "env",
+		Backend:       "local-process",
+		Agent:         "claude",
+		Task:          "do thing",
+		Command:       CommandSpec{Program: "true", Env: []string{"PATH=/usr/bin"}},
+		PolicyEngine:  eng,
+		ShellShim:     true,
+		ShellShimDir:  shimDir,
+		ShimHelperCmd: override,
+	})
+	if err != nil {
+		t.Fatalf("NewSupervisor: %v", err)
+	}
+	body, err := os.ReadFile(filepath.Join(shimDir, "sh"))
+	if err != nil {
+		t.Fatalf("read sh wrapper: %v", err)
+	}
+	wantExec := "exec " + override + " shell sh \"$@\""
+	if !strings.Contains(string(body), wantExec) {
+		t.Errorf("sh wrapper missing override exec line %q; body = %q", wantExec, string(body))
+	}
+}
+
+// TestNewSupervisor_ShellShim_HostModeEmitsCoverageDegraded is the
+// Batch 1.3 acceptance: host-mode runs (BackendAdapter == nil) cannot
+// install the canonical absolute-path shadow mounts, so the supervisor
+// emits `shim_coverage_degraded` to make the degradation auditable.
+// The verb carries the canonical-path prefix set in metadata so a
+// downstream remediation reader sees exactly which paths the shim
+// cannot shadow.
+func TestNewSupervisor_ShellShim_HostModeEmitsCoverageDegraded(t *testing.T) {
+	dir := newSupervisorRunDir(t)
+	shimDir := t.TempDir()
+	eng := policy.NewEngine(validPolicyConfig())
+
+	_, err := NewSupervisor(SupervisorOptions{
+		RunDir:       dir.Path,
+		RunID:        dir.ID,
+		EnvName:      "env",
+		Backend:      "local-process",
+		Agent:        "claude",
+		Task:         "do thing",
+		Command:      CommandSpec{Program: "true", Env: []string{"PATH=/usr/bin"}},
+		PolicyEngine: eng,
+		ShellShim:    true,
+		ShellShimDir: shimDir,
+		// BackendAdapter intentionally nil to drive host-mode.
+	})
+	if err != nil {
+		t.Fatalf("NewSupervisor: %v", err)
+	}
+
+	// Read lifecycle.jsonl and look for the shim_coverage_degraded verb.
+	raw, err := os.ReadFile(filepath.Join(dir.Path, "lifecycle.jsonl"))
+	if err != nil {
+		t.Fatalf("read lifecycle.jsonl: %v", err)
+	}
+	if len(raw) == 0 {
+		t.Fatalf("lifecycle.jsonl is empty, want at least the shim_coverage_degraded verb")
+	}
+	found := false
+	for _, line := range strings.Split(strings.TrimRight(string(raw), "\n"), "\n") {
+		var evt LifecycleEvent
+		if err := json.Unmarshal([]byte(line), &evt); err != nil {
+			t.Fatalf("parse lifecycle event %q: %v", line, err)
+		}
+		if evt.Verb != LifecycleVerbShimCoverageDegraded {
+			continue
+		}
+		found = true
+		if evt.Metadata["reason"] != "host_mode" {
+			t.Errorf("shim_coverage_degraded metadata reason = %q, want host_mode", evt.Metadata["reason"])
+		}
+		if evt.Metadata["program"] != "*" {
+			t.Errorf("shim_coverage_degraded metadata program = %q, want *", evt.Metadata["program"])
+		}
+		gotMissing := evt.Metadata["missing"]
+		wantMissing := strings.Join(policy.ShimCanonicalPathPrefixes, ",")
+		if gotMissing != wantMissing {
+			t.Errorf("shim_coverage_degraded metadata missing = %q, want %q", gotMissing, wantMissing)
+		}
+	}
+	if !found {
+		t.Errorf("lifecycle.jsonl missing shim_coverage_degraded verb; raw = %q", string(raw))
 	}
 }
 

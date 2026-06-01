@@ -49,6 +49,19 @@ import (
 // case-insensitive Windows PATH) has a single place to switch.
 const shimPathEnvKey = "PATH"
 
+// DefaultShimHelperCmd is the in-sandbox command the supervisor writes
+// into each wrapper's `exec` line at canonical pre-launch step 10 (Plan
+// §5.5). The plan pins the `ai-env` binary's in-sandbox path to
+// `/usr/local/bin/ai-env` (bind-mounted from the host-side binary at
+// Create), so the wrapper invokes the helper subcommand via the same
+// absolute path on every backend. Host-mode runs (BackendAdapter == nil)
+// have no sandbox; the wrapper line still points at the in-sandbox path
+// because the wrappers are NOT executed in host mode (the supervisor
+// emits `shim_coverage_degraded` instead). Callers that want to drive
+// the wrapper from a real host-side helper for a test can override the
+// command via SupervisorOptions.ShimHelperCmd.
+const DefaultShimHelperCmd = "/usr/local/bin/ai-env shim-helper"
+
 // InjectShimPath returns a copy of env with the PATH entry rewritten so
 // shimDir is the first directory the child sees. The helper is exported
 // so the future `ai-env run` CLI can compose its own env construction
@@ -160,4 +173,82 @@ func openShellCommandsLog(runDir, runID string, now func() time.Time) (*policy.S
 		return nil, fmt.Errorf("run: open shell commands log: %w", err)
 	}
 	return log, nil
+}
+
+// installShimWrappers materializes the per-program wrapper scripts in
+// shimDir by delegating to policy.InstallShim. The function is the
+// Plan §5.5 step 10 / Batch 1.4 wiring point: the supervisor owns the
+// install side of the shim because the wrapper templates and the
+// canonical program set are pinned in internal/policy, and the
+// supervisor is the only caller that knows when the shim has been
+// opted into for a run.
+//
+// helperCmd is the `exec` target the wrapper writes into each wrapper
+// script. An empty helperCmd falls back to DefaultShimHelperCmd so
+// production callers (the future `ai-env run --shell-shim` CLI) do
+// not have to repeat the in-sandbox path; tests pass an explicit
+// command (often a host-side stub) when they want to drive the
+// wrapper end-to-end without standing up a backend.
+//
+// Errors propagate verbatim from policy.InstallShim so a missing
+// shimDir or a non-directory at the path surfaces with the same
+// message the policy package produces. The supervisor turns a non-nil
+// return into a construction failure rather than a degraded run: a
+// shim that cannot be installed at all is qualitatively different
+// from a shim that lost coverage on individual canonical paths
+// (which is what the shim_coverage_degraded lifecycle verb is for).
+func installShimWrappers(shimDir, helperCmd string) error {
+	cmd := strings.TrimSpace(helperCmd)
+	if cmd == "" {
+		cmd = DefaultShimHelperCmd
+	}
+	if _, err := policy.InstallShim(policy.InstallShimOptions{
+		ShimDir:   shimDir,
+		HelperCmd: cmd,
+		// Programs left nil so InstallShim falls back to the canonical
+		// ShimProgramSet. The supervisor never installs a partial set
+		// in production: the canonical fixed list is the defense-in-
+		// depth surface the plan's Bucket 1 locked decision pins.
+	}); err != nil {
+		return fmt.Errorf("run: install shim wrappers: %w", err)
+	}
+	return nil
+}
+
+// emitShimHostModeDegraded writes the `shim_coverage_degraded` lifecycle
+// verb to the supervisor's lifecycle writer when the run is in host
+// mode (BackendAdapter == nil). Plan Batch 1.3 calls for the emission:
+// host-mode runs have no sandbox to install the canonical absolute-
+// path shadow bind-mounts into, so the shim's coverage is limited to
+// PATH-relative wrapper resolution. The verb makes that degradation
+// auditable so a reviewer can correlate post-mortem behavior to the
+// missing absolute-path shadow set.
+//
+// Metadata keys (per lifecycle_verbs.go's documented table):
+//
+//   - "program" = "*" — the degradation affects every shimmed program
+//     uniformly because the missing surface is the entire canonical-
+//     path mount layer, not a per-program failure. The "*" sentinel
+//     distinguishes the host-mode emission from the per-entry adapter
+//     emission (which carries a concrete program name) so the
+//     aggregator can dedupe correctly.
+//   - "missing" = the comma-separated canonical-path prefix set
+//     (`/usr/bin,/bin,/usr/local/bin` by default) so a remediation
+//     reader sees exactly which paths the shim cannot shadow.
+//   - "reason" = "host_mode" — the short token the doctor's
+//     remediation table joins on.
+//
+// Returns the lifecycle writer's error verbatim so the caller (the
+// NewSupervisor wiring block) can abort construction when the
+// audit record cannot be made durable.
+func emitShimHostModeDegraded(lcWri *LifecycleWriter) error {
+	if lcWri == nil {
+		return errors.New("run: emit shim_coverage_degraded requires a lifecycle writer")
+	}
+	missing := strings.Join(policy.ShimCanonicalPathPrefixes, ",")
+	return lcWri.WriteVerb(LifecycleVerbShimCoverageDegraded, map[string]string{
+		"program": "*",
+		"missing": missing,
+		"reason":  "host_mode",
+	})
 }

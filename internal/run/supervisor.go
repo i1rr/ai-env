@@ -380,13 +380,27 @@ type SupervisorOptions struct {
 	ShellShim bool
 
 	// ShellShimDir is the absolute path of the directory the supervisor
-	// prepends to the child's PATH when ShellShim is true. The shim
-	// binary itself (the wrapper replacing bash / sh / etc.) lives
-	// inside this directory; the caller (the future `ai-env run` CLI or
-	// a test fixture) is responsible for placing the wrapper before the
-	// supervisor is started. Ignored when ShellShim is false; required
-	// otherwise.
+	// prepends to the child's PATH when ShellShim is true. The
+	// supervisor materializes per-program wrapper scripts here via
+	// policy.InstallShim (Plan §5.5 step 10) at construction time:
+	// the directory is created by the supervisor's caller (the future
+	// `ai-env run --shell-shim` CLI or a test fixture), and the
+	// supervisor writes one wrapper file per ShimProgramSet entry into
+	// it. Ignored when ShellShim is false; required otherwise.
 	ShellShimDir string
+
+	// ShimHelperCmd is the command line the wrapper scripts re-exec via
+	// `exec` inside the sandbox. Defaults to DefaultShimHelperCmd
+	// (`/usr/local/bin/ai-env shim-helper`) when empty: that is the
+	// in-sandbox path the `ai-env` binary is bind-mounted at per the
+	// plan's canonical pre-launch step 3 mount split. Tests override the
+	// value to point at a host-side test stub when they want to drive
+	// the wrapper end-to-end without standing up a backend; production
+	// callers leave it empty so the default in-sandbox path is used.
+	//
+	// Ignored when ShellShim is false; the supervisor only materializes
+	// wrappers when the shim is wired.
+	ShimHelperCmd string
 }
 
 // SupervisorResult is the outcome the supervisor reports back from Run.
@@ -801,6 +815,54 @@ func NewSupervisor(opts SupervisorOptions) (*Supervisor, error) {
 			_ = netWri.Close()
 			_ = lcWri.Close()
 			return nil, err
+		}
+		// Plan §5.5 step 10 / Batch 1.4: materialize per-program wrapper
+		// scripts in ShellShimDir so PATH resolution lands on the shim
+		// before the real system binary. The supervisor owns this side
+		// of the wiring (the directory is the caller's, the wrappers are
+		// the supervisor's); the wrappers are static templates and any
+		// failure aborts construction so an operator does not silently
+		// run with a degraded shim surface. The HelperCmd is the
+		// in-sandbox `ai-env shim-helper` invocation per the plan's
+		// canonical mount layout; an empty ShimHelperCmd falls back to
+		// DefaultShimHelperCmd so production callers do not have to
+		// duplicate the constant.
+		if err := installShimWrappers(opts.ShellShimDir, opts.ShimHelperCmd); err != nil {
+			if shellCmdLog != nil {
+				_ = shellCmdLog.Close()
+			}
+			if pdWri != nil {
+				_ = pdWri.Close()
+			}
+			_ = streams.Close()
+			_ = netWri.Close()
+			_ = lcWri.Close()
+			return nil, err
+		}
+		// Plan Batch 1.3: "Host-mode runs emit shim_coverage_degraded
+		// lifecycle." Host mode (no BackendAdapter wired) means the
+		// supervisor has no sandbox to install the canonical absolute-
+		// path shadow mounts into; the shim's coverage is limited to
+		// PATH-relative resolution only. Emitting the verb here makes
+		// the degradation auditable at the same point the operator can
+		// remediate it (wire a backend). The verb is emitted once per
+		// run with Metadata describing the missing canonical paths so
+		// `ai-env leaks` / the doctor remediation table can map the
+		// run's degraded surface to the canonical path set the plan
+		// pins.
+		if opts.BackendAdapter == nil {
+			if err := emitShimHostModeDegraded(lcWri); err != nil {
+				if shellCmdLog != nil {
+					_ = shellCmdLog.Close()
+				}
+				if pdWri != nil {
+					_ = pdWri.Close()
+				}
+				_ = streams.Close()
+				_ = netWri.Close()
+				_ = lcWri.Close()
+				return nil, err
+			}
 		}
 		// Mutate the child's PATH so the shim directory resolves first.
 		// We rewrite opts.Command.Env in place on the SupervisorOptions
