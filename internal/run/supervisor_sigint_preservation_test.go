@@ -80,9 +80,9 @@ func initSigintFixtureRepo(t *testing.T) string {
 // supervisor walks its terminal sequence; and the test asserts every
 // artifact survived.
 func TestStep17_SIGINTPreservesLogsAndPartialDiff(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("SIGINT semantics on Windows do not match the supervisor contract")
-	}
+	// The //go:build !windows constraint at the top of this file
+	// already gates the test off on Windows; the supervisor's SIGINT
+	// semantics only match the plan's contract on POSIX hosts.
 	skipIfNoSh(t)
 
 	// --- 1. Real git repo + worktree-backed workspace --------------------

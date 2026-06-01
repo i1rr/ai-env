@@ -75,13 +75,12 @@ const acceptanceTokenLiteral = "ghs_ACCEPT_RAW_TOKEN_AAAAAAAAAAAAAAAAAAAA1234567
 // BrokerToken handle returned to callers carries only metadata. This
 // mirrors the production shape pinned by plan 07 step 8.
 type realPATBroker struct {
-	source   *PATSource
-	holder   *TokenHolder
-	scanner  *scanners.BuiltIn
-	logger   Logger
-	logBuf   *bytes.Buffer
-	extras   []string
-	pathOpts PathGateOptions
+	source  *PATSource
+	holder  *TokenHolder
+	scanner *scanners.BuiltIn
+	logger  Logger
+	logBuf  *bytes.Buffer
+	extras  []string
 
 	// transport captures the bytes that would have been pushed to git.
 	// The acceptance tests inspect it to confirm the broker DID

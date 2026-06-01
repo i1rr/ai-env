@@ -24,15 +24,14 @@ import (
 // interface one method at a time so a future change to the interface
 // shows up here as a compile error.
 type fakeBroker struct {
-	prepareErr  error
-	acquireErr  error
-	pushErr     error
-	scanErr     error
-	createErr   error
-	revokeErr   error
-	scanResult  scanners.ScanResult
-	createPR    githubbroker.PRResult
-	createDraft bool
+	prepareErr error
+	acquireErr error
+	pushErr    error
+	scanErr    error
+	createErr  error
+	revokeErr  error
+	scanResult scanners.ScanResult
+	createPR   githubbroker.PRResult
 
 	calls []string
 }

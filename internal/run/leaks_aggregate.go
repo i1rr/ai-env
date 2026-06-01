@@ -153,11 +153,7 @@ func AggregateLeaks(runDir string, opts AggregateLeaksOptions) (int, error) {
 	// the O_EXCL open, the per-record encode + redact, the fsync,
 	// and the rename. Abort is called on any error so a partial tmp
 	// is not promoted to leaks.jsonl.
-	w, err := OpenLeaksWriter(runDir, LeaksWriterOptions{
-		RunID:        opts.RunID,
-		Now:          opts.Now,
-		RandomReader: opts.RandomReader,
-	})
+	w, err := OpenLeaksWriter(runDir, LeaksWriterOptions(opts))
 	if err != nil {
 		return 0, fmt.Errorf("run: open leaks writer: %w", err)
 	}

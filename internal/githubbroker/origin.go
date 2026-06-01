@@ -367,12 +367,8 @@ func RecordOriginPin(workspaceDir string, pin OriginPin) error {
 	}
 
 	file := originPinFile{
-		Version: OriginPinSchemaVersion,
-		OriginPin: originPinFields{
-			Owner: pin.Owner,
-			Name:  pin.Name,
-			Host:  pin.Host,
-		},
+		Version:   OriginPinSchemaVersion,
+		OriginPin: originPinFields(pin),
 	}
 	data, err := yaml.Marshal(file)
 	if err != nil {

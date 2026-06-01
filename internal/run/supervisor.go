@@ -680,7 +680,6 @@ type Supervisor struct {
 	child     *exec.Cmd
 	childErr  error
 	childDone chan struct{}
-	waitOnce  sync.Once
 
 	// backendActive reports whether the exec is in flight through
 	// Backend.Exec rather than a host exec.Cmd. When true, child is nil
@@ -1594,7 +1593,7 @@ func (s *Supervisor) runLoop() terminalCause {
 			// whether the exit was clean. We let the post-loop code
 			// inspect the recorded exit status; here we just pick the
 			// state.
-			waitErr, exitCode, hasExitCode := s.childWaitOutcome()
+			exitCode, hasExitCode, waitErr := s.childWaitOutcome()
 			if waitErr == nil && hasExitCode && exitCode == 0 {
 				return terminalCause{state: StateCompleted, reason: StopReasonAgentExit, note: "child exited 0"}
 			}
@@ -1669,28 +1668,32 @@ type exitInfo struct {
 }
 
 // childWaitOutcome returns the wait-side state the runLoop's exit-
-// detection branch needs: the spawn / wait error, the reported exit
-// code, and whether an exit code was actually reported. Hides the
+// detection branch needs: the reported exit code, whether an exit
+// code was actually reported, and the spawn / wait error. Hides the
 // host / backend dispatch so the runLoop body stays readable.
-func (s *Supervisor) childWaitOutcome() (waitErr error, exitCode int, hasExitCode bool) {
+//
+// The error is the last return value so the signature follows the
+// Go convention staticcheck's ST1008 enforces; callers that need
+// only the exit code can blank the error in place.
+func (s *Supervisor) childWaitOutcome() (exitCode int, hasExitCode bool, waitErr error) {
 	s.childMu.Lock()
 	defer s.childMu.Unlock()
 	if s.backendActive {
 		if s.backendExecErr != nil {
-			return s.backendExecErr, -1, false
+			return -1, false, s.backendExecErr
 		}
 		if s.backendResult.HasExitCode {
-			return nil, s.backendResult.ExitCode, true
+			return s.backendResult.ExitCode, true, nil
 		}
-		return nil, -1, false
+		return -1, false, nil
 	}
 	if s.childErr != nil {
-		return s.childErr, -1, false
+		return -1, false, s.childErr
 	}
 	if s.child != nil && s.child.ProcessState != nil && s.child.ProcessState.Exited() {
-		return nil, s.child.ProcessState.ExitCode(), true
+		return s.child.ProcessState.ExitCode(), true, nil
 	}
-	return nil, -1, false
+	return -1, false, nil
 }
 
 // collectExit returns the child's exit info. By the time runLoop

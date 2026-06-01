@@ -52,11 +52,6 @@ import (
 	"github.com/rivan1986/ai-env/internal/run"
 )
 
-// shellModeName is the helper mode emitted on the helper-rpc-aborted
-// lifecycle record when the supervisor logs an aborted RPC for the
-// shell helper. The plan's lifecycle metadata table pins the name.
-const shellModeName = "shell"
-
 // shellHelperDialTimeout caps how long the helper waits for the
 // supervisor's control socket to accept the connection. The plan
 // pins "fail-closed on socket unreachable" without a specific
@@ -304,7 +299,7 @@ func shellEvaluateViaControlSocket(argv []string) (run.ControlSocketResponse, er
 		return run.ControlSocketResponse{Decision: "block", Reason: "Hello read failed"}, err
 	}
 	if helloResp.Decision != "allow" {
-		return helloResp, fmt.Errorf("Hello rejected: %s", helloResp.Reason)
+		return helloResp, fmt.Errorf("hello rejected: %s", helloResp.Reason)
 	}
 
 	// EvaluateShellCommand.

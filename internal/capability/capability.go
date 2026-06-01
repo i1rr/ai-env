@@ -224,20 +224,6 @@ var slirp4netnsMarkers = struct {
 	cgroup:   "/proc/self/cgroup",
 }
 
-// dockerUserNSConfigPaths is the list of files the Linux Docker
-// daemon writes when configured with `userns-remap`. The detector
-// reports UserNSRemap=true when any of them parses as a non-default
-// remap entry; this is conservative on the side of "be defensive".
-// Real userns-remap detection requires inspecting the per-container
-// /proc/<pid>/uid_map at envID time (the backend's job); the
-// detector's bit is only the "make sure the backend implements
-// MappedUID" gate.
-var dockerUserNSConfigPaths = []string{
-	"/etc/docker/daemon.json",
-	"/etc/subuid",
-	"/etc/subgid",
-}
-
 // Detect probes the host once and returns the resulting capability
 // snapshot. The function never fails — probes that cannot determine
 // their answer record an entry in `Errors` and fall through to the

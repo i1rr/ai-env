@@ -22,11 +22,10 @@ import (
 // subprocess. The runner returns a canned ExecResult so the tests
 // control the exit code.
 type recordingRunner struct {
-	mu       sync.Mutex
-	calls    []recordedExec
-	result   ExecResult
-	runFunc  func(ctx context.Context, path string, argv []string) ExecResult // optional override
-	blockCtx context.Context                                                  // optional: when set, the runner waits on this ctx
+	mu      sync.Mutex
+	calls   []recordedExec
+	result  ExecResult
+	runFunc func(ctx context.Context, path string, argv []string) ExecResult // optional override
 }
 
 type recordedExec struct {

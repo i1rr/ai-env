@@ -222,8 +222,18 @@ func TestContinueIntegration_EndToEnd(t *testing.T) {
 	if cont.NewRun.ID == prevDir.ID {
 		t.Errorf("NewRun.ID = %q, must differ from previous", cont.NewRun.ID)
 	}
-	if cont.NewRun.ID <= prevDir.ID {
-		t.Errorf("NewRun.ID %q must sort strictly after previous %q", cont.NewRun.ID, prevDir.ID)
+	// The ID format is "YYYYMMDD-HHMMSS-<6hex>"; the random suffix is
+	// only for distinctness, not for ordering. Two runs created in the
+	// same second produce IDs whose suffixes can be lexicographically
+	// either way, so we compare just the timestamp prefix (the first
+	// 15 characters) for temporal ordering and rely on the != check
+	// above for distinctness.
+	if len(cont.NewRun.ID) >= 15 && len(prevDir.ID) >= 15 {
+		newPrefix := cont.NewRun.ID[:15]
+		prevPrefix := prevDir.ID[:15]
+		if newPrefix < prevPrefix {
+			t.Errorf("NewRun.ID timestamp prefix %q must be >= previous %q", newPrefix, prevPrefix)
+		}
 	}
 	if filepath.Dir(cont.NewRun.Path) != filepath.Dir(prevDir.Path) {
 		t.Errorf("NewRun parent = %q, want sibling of previous parent %q",

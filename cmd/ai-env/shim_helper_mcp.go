@@ -196,7 +196,7 @@ func mcpHelloPing(sockPath, primary string) (run.ControlSocketResponse, error) {
 		return run.ControlSocketResponse{}, err
 	}
 	if resp.Decision != "allow" {
-		return resp, fmt.Errorf("Hello rejected: %s", resp.Reason)
+		return resp, fmt.Errorf("hello rejected: %s", resp.Reason)
 	}
 	return resp, nil
 }
