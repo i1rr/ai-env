@@ -469,20 +469,33 @@ func (e *PolicyEngine) evalBrokerAction(evt Event) (Decision, string) {
 // evalShellCommand evaluates a shell_command event. The engine matches
 // the command line against:
 //
-//  1. The high-risk patterns the shim recognizes (curl-pipe-shell,
-//     SSH path access, cloud metadata IP). These are hard denies the
-//     engine enforces even when policy.commands.deny_patterns does
-//     not list them; plan 08 step 8 makes the shim deny these.
-//  2. policy.commands.deny_patterns from policy.yaml. Each entry is a
+//  1. The POSIX-tokenized high-risk rules the shim recognizes
+//     (curl-pipe-shell, egress fetch tools by basename, SSH path
+//     access, cloud metadata IP, interpreter inline source, env-strip
+//     re-exec). Plan Batches 1.1 + 1.2 pin this surface: the
+//     tokenizer (shell_tokenize.go) handles quoting/escaping so an
+//     agent that types `c"u"rl ...` or `/usr/bin/curl ...` cannot
+//     dodge the matcher; the rule layer (shell_high_risk.go)
+//     compares basenames and inspects argv flags so the inline
+//     interpreter form (`python -c "..."`) is refused.
+//  2. The legacy substring HighRiskShellPatterns set is still
+//     consulted as defense-in-depth: if the tokenizer fails on
+//     malformed input (an unterminated quote), the engine falls back
+//     to the lowercase-substring matcher before reaching the user's
+//     deny_patterns. The legacy list is also the source of truth the
+//     shim helper's script-content scan reads (Batch 0.3); keeping
+//     the export keeps a single list across both surfaces.
+//  3. policy.commands.deny_patterns from policy.yaml. Each entry is a
 //     substring match against the command line (case-insensitive).
-//  3. policy.commands.default ("allow"/"deny"/"allow_in_sandbox").
+//  4. policy.commands.default ("allow"/"deny"/"allow_in_sandbox").
 //     "allow" and "allow_in_sandbox" produce DecisionAllow; "deny"
 //     produces DecisionDeny.
 //
 // The command line is read from Target (the convention for shell
 // commands per the Event doc comment); Metadata["argv"] is preserved on
-// the decision but is not consulted by the rule logic (a future
-// refactor that tokenizes argv at the call site can change this).
+// the decision and consulted by the tokenizer when the caller already
+// did the split (handled by the supervisor's EvaluateShellCommand
+// helper, not here — this function only sees the joined cmd line).
 func (e *PolicyEngine) evalShellCommand(evt Event) (Decision, string) {
 	cmd := strings.TrimSpace(evt.Target)
 	if cmd == "" {
@@ -490,10 +503,26 @@ func (e *PolicyEngine) evalShellCommand(evt Event) (Decision, string) {
 	}
 	lower := strings.ToLower(cmd)
 
-	// High-risk patterns the shim hard-denies. Mirrors plan 08 step
-	// 8's "deny obvious high-risk patterns" list. These fire ahead of
-	// the user's policy.commands rules so a misconfigured operator
-	// cannot accidentally allow them.
+	// Token-aware rule layer. The tokenizer handles single/double
+	// quoting and backslash escapes so an agent that obfuscates the
+	// program name with quotes cannot bypass the basename check.
+	// Malformed input (unterminated quote) returns an error here; we
+	// fall through to the legacy substring matcher so a syntactically
+	// broken command line is still subject to the hard-deny list.
+	if tokens, terr := ShellTokenize(cmd); terr == nil {
+		if rule, reason := matchHighRiskShellCommands(tokens); rule != nil {
+			return DecisionDeny, reason
+		}
+	}
+
+	// Legacy substring HighRiskShellPatterns list. Kept as
+	// defense-in-depth for the malformed-tokenizer case and as the
+	// canonical list the shim helper's script-content scanner reads
+	// (shim_helper_shell.go). A token-aware match already fired
+	// above for well-formed input; this loop catches the edge cases
+	// where the tokenizer rejected the input or where a substring
+	// matches across token boundaries (e.g. `cat /etc/passwd ; cat
+	// id_rsa` is caught by both surfaces).
 	for _, pat := range HighRiskShellPatterns {
 		if strings.Contains(lower, pat) {
 			return DecisionDeny, fmt.Sprintf("shell command matches high-risk pattern %q", pat)

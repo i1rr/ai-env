@@ -373,8 +373,11 @@ func TestShim_RecursionGuard(t *testing.T) {
 		t.Fatalf("NewShim: %v", err)
 	}
 
+	// `ls -la` is benign at the policy layer (no high-risk rule, no
+	// interpreter inline source), so the engine returns allow and the
+	// shim proceeds to the recursion guard.
 	_, _, runErr := shim.Run(context.Background(), RunOptions{
-		Argv: []string{"bash", "-c", "echo hi"},
+		Argv: []string{"ls", "-la"},
 	})
 	if !errors.Is(runErr, ErrShimRecursion) {
 		t.Fatalf("error %v must wrap ErrShimRecursion", runErr)

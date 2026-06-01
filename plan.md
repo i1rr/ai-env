@@ -149,9 +149,9 @@ All five per-subsystem streams stay as **source of truth**. `leaks.jsonl` is the
 
 ### Section 1 — Bucket 7 + Bucket 1: shell-shim hardening
 
-**Batch 1.1 — POSIX-aware tokenizer** — as iter-3.
+**Batch 1.1 — POSIX-aware tokenizer** [x] — as iter-3.
 
-**Batch 1.2 — Tighten `HighRiskShellPatterns`** — as iter-3 + interpreter-via-file uses single `O_RDONLY \| O_NOFOLLOW` fd (Batch 0.3) for both scan + execveat. macOS uses `/dev/fd/<n>`; residual TOCTOU on filesystems without `/dev/fd` documented in platform matrix.
+**Batch 1.2 — Tighten `HighRiskShellPatterns`** [x] — as iter-3 + interpreter-via-file uses single `O_RDONLY \| O_NOFOLLOW` fd (Batch 0.3) for both scan + execveat. macOS uses `/dev/fd/<n>`; residual TOCTOU on filesystems without `/dev/fd` documented in platform matrix.
 
 **Batch 1.3 — Sandbox absolute-path shadow (canonical fixed set)**
 - No probe. Supervisor's `EnvSpec.BindMounts` at Create includes one entry per (program × canonical path) — declared by `internal/policy/shim_programs.go`. Backends that cannot satisfy a bind-mount (target path nonexistent in image and Docker refuses auto-create) log per-entry warning + continue; the wrapper for that program is still installed in `shimDir` (PATH-relative coverage).
