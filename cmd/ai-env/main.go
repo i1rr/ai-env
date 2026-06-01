@@ -47,6 +47,7 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(newPolicyCmd())
 	root.AddCommand(newDestroyCmd())
 	root.AddCommand(newMCPCmd())
+	root.AddCommand(newLeaksCmd())
 	root.AddCommand(newShimHelperCmd())
 
 	return root
@@ -475,6 +476,71 @@ func newReportCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().String("run", "", "Specific run id to report on (defaults to the env's latest run)")
+	return cmd
+}
+
+// newLeaksCmd builds the `ai-env leaks <env-name>` subcommand. Flag
+// parsing happens here; the actual rendering logic lives in
+// internal/cli so it can be tested without involving Cobra.
+//
+// `ai-env leaks` surfaces the unified leaks.jsonl view the supervisor
+// materializes at finalize time (Plan §8.1 aggregator, §8.2 CLI). The
+// command reads the atomically-replaced leaks.jsonl and renders one
+// row per LeakRecord; staging files matching leaks.jsonl.tmp.* are
+// ignored per the plan's explicit exclusion.
+//
+// --format selects table (default) or json (the JSONL projection used
+// by downstream pipelines such as jq); --vector and --source filter
+// the output to the requested leak-coverage audit vector or source
+// stream; --run pins a specific historical run id when the operator
+// does not want the env's latest run.
+func newLeaksCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "leaks <env-name>",
+		Short: "Render the unified leaks.jsonl view for an env's run",
+		Long: "Render the unified leaks.jsonl view for an env's run. " +
+			"The view is the merged projection of every per-subsystem " +
+			"stream (lifecycle, policy-decisions, mcp-calls, " +
+			"network-events, shell-commands, filesystem-events, " +
+			"transcript, secret-scan) materialized atomically by the " +
+			"supervisor at finalize time. Staging files matching " +
+			"leaks.jsonl.tmp.* are skipped. Use --format json to emit " +
+			"JSONL for downstream pipelines; --vector and --source " +
+			"filter to a single leak-coverage audit vector or source " +
+			"stream.",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			runID, err := cmd.Flags().GetString("run")
+			if err != nil {
+				return fmt.Errorf("ai-env leaks: read --run: %w", err)
+			}
+			format, err := cmd.Flags().GetString("format")
+			if err != nil {
+				return fmt.Errorf("ai-env leaks: read --format: %w", err)
+			}
+			vector, err := cmd.Flags().GetInt("vector")
+			if err != nil {
+				return fmt.Errorf("ai-env leaks: read --vector: %w", err)
+			}
+			source, err := cmd.Flags().GetString("source")
+			if err != nil {
+				return fmt.Errorf("ai-env leaks: read --source: %w", err)
+			}
+			return cli.RunLeaks(cli.LeaksOptions{
+				EnvName: args[0],
+				RunID:   runID,
+				Format:  cli.LeaksFormat(format),
+				Vector:  vector,
+				Source:  source,
+				Stdout:  cmd.OutOrStdout(),
+				Stderr:  cmd.ErrOrStderr(),
+			})
+		},
+	}
+	cmd.Flags().String("run", "", "Specific run id to read leaks.jsonl from (defaults to the env's latest run)")
+	cmd.Flags().String("format", "table", "Output format: table (default, human-readable) or json (JSONL pass-through)")
+	cmd.Flags().Int("vector", 0, "Filter to a single leak-coverage audit vector (1-8); zero (default) prints every row")
+	cmd.Flags().String("source", "", "Filter to a single source_stream value (e.g. policy-decisions, mcp-calls, secret-scan); empty prints every row")
 	return cmd
 }
 

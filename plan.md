@@ -270,13 +270,13 @@ Acceptance:
 
 ### Section 8 — `leaks.jsonl` aggregator + CLI
 
-**Batch 8.1 — `aggregateLeaks`** — as iter-3 with:
+**Batch 8.1 — `aggregateLeaks`** [x] — as iter-3 with:
 - Tmp filename `<runDir>/leaks.jsonl.tmp.<pid>.<rand>` with `O_EXCL`.
 - `fsync` before `os.Rename`.
 - Stale-tmp cleanup at supervisor start (Batch 0.2).
 - Dedup key for scanner-sourced records: `(source_stream, source_line, vector, evidence.pattern, evidence.finding_id)` — includes pattern name to avoid collapsing distinct findings on the same line.
 
-**Batch 8.2 — `ai-env leaks` CLI** — as iter-3 + ignores `*.tmp.*` files when reading.
+**Batch 8.2 — `ai-env leaks` CLI** [x] — as iter-3 + ignores `*.tmp.*` files when reading.
 
 ### Section 9 — Red-team scenario acceptance suite — as iter-3 + adds:
 
