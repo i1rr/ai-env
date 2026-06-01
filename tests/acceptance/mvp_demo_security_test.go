@@ -208,8 +208,8 @@ func TestAcceptance_HostSSHKeyReadDenied(t *testing.T) {
 	if dec.Type != policy.DecisionDeny {
 		t.Errorf("decision = %q, want %q", dec.Type, policy.DecisionDeny)
 	}
-	if !strings.Contains(strings.ToLower(dec.Reason), "high-risk pattern") {
-		t.Errorf("Reason = %q, want substring 'high-risk pattern'", dec.Reason)
+	if !strings.Contains(strings.ToLower(dec.Reason), "high-risk rule") {
+		t.Errorf("Reason = %q, want substring 'high-risk rule'", dec.Reason)
 	}
 
 	flushMVPSupervisor(t, sup)
