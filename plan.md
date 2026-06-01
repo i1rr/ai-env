@@ -219,9 +219,9 @@ All five per-subsystem streams stay as **source of truth**. `leaks.jsonl` is the
 
 ### Section 5 — Bucket 5 + sequencing
 
-**Batch 5.0 — `EgressObserverMode`** — as iter-3.
+**Batch 5.0 — `EgressObserverMode`** [x] — as iter-3.
 
-**Batch 5.1 — `EgressObserver` interface** — as iter-3.
+**Batch 5.1 — `EgressObserver` interface** [x] — as iter-3.
 
 **Batch 5.2 — Linux NFLOG** — as iter-3; attach happens at **step 5** (post-Start, netns now valid).
 
