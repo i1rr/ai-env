@@ -278,7 +278,7 @@ Acceptance:
 
 **Batch 8.2 — `ai-env leaks` CLI** [x] — as iter-3 + ignores `*.tmp.*` files when reading.
 
-### Section 9 — Red-team scenario acceptance suite — as iter-3 + adds:
+### Section 9 — Red-team scenario acceptance suite [x] — as iter-3 + adds:
 
 - `TestLeak_OriginDriftBetweenSetupAndPR_Blocked` (Section 4 pin).
 - `TestLeak_AgentForgesMCPCallAcrossServers_Blocked` (per-server token scoping).
