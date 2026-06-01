@@ -132,7 +132,7 @@ All five per-subsystem streams stay as **source of truth**. `leaks.jsonl` is the
 - `internal/policy/shim_install.go`: `InstallShim(shimDir, "ai-env shim-helper", programs)` writes wrappers; **wrapper unsets `AI_ENV_CONTROL_SOCKET` from the re-exec'd child env** (the primary control_token is never in the agent env to begin with).
 - `internal/policy/shim_programs.go`: single canonical constant — programs list = `{sh, bash, dash, zsh, python, python3, python3.10, python3.11, python3.12, perl, ruby, node, curl, wget, nc, ncat, socat, chmod, osascript, awk, deno, env}`; canonical-path set = `{/usr/bin/<prog>, /bin/<prog>, /usr/local/bin/<prog>}` for each.
 
-**Batch 0.4 — Capability detection** — as iter-3 + Linux userns-remap detection.
+**Batch 0.4 — Capability detection** [x] — as iter-3 + Linux userns-remap detection.
 
 **Batch 0.5 — BindMount + EnvSpec + BackendEventSink + GatewayAddress + MappedUID + ProbeImage**
 - `internal/backend/backend.go`:
@@ -145,7 +145,7 @@ All five per-subsystem streams stay as **source of truth**. `leaks.jsonl` is the
 - **Mount split**: supervisor creates `<runDir>/ipc/` subdirectory; mounts THAT into the sandbox at `/var/run/ai-env/`, not the whole runDir. Sensitive files (`leaks.jsonl`, `secret-scan.json`, `*.jsonl` for inputs) stay in `<runDir>/` directly (host-only). Agent-visible files (`control.sock`, `mcp-servers.json`, `mcp-servers.real.json`, `orig/<prog>` originals) live in `<runDir>/ipc/`.
 - Acceptance: as iter-3 + `TestEnvSpec_RunDirSensitiveFilesNotInSandbox` — agent UID cannot read `leaks.jsonl` (file not visible from inside).
 
-**Batch 0.6 — Test fixtures + harness** — as iter-3.
+**Batch 0.6 — Test fixtures + harness** [x] — as iter-3.
 
 ### Section 1 — Bucket 7 + Bucket 1: shell-shim hardening
 
