@@ -162,7 +162,7 @@ All five per-subsystem streams stay as **source of truth**. `leaks.jsonl` is the
 
 ### Section 2 — Bucket 2: ProviderProxy live
 
-**Batch 2.1 — `.ai-env/secrets.local.yaml` loader** — as iter-3.
+**Batch 2.1 — `.ai-env/secrets.local.yaml` loader** [x] — as iter-3.
 
 **Batch 2.2 — ProviderProxy: multi-provider, ns-safe, upstream allowlist**
 - One `ProviderProxy` per provider in active credentials.
@@ -172,7 +172,7 @@ All five per-subsystem streams stay as **source of truth**. `leaks.jsonl` is the
 
 **Batch 2.3 — Supervisor starts ProviderProxy(es)** — per Batch 5.5 step 8.
 
-**Batch 2.4 — `BuildProviderProxyFromSecrets`** — as iter-3.
+**Batch 2.4 — `BuildProviderProxyFromSecrets`** [x] — as iter-3.
 
 ### Section 3 — Bucket 4: MCP gateway live
 
