@@ -18,6 +18,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/rivan1986/ai-env/internal/config"
+	"github.com/rivan1986/ai-env/internal/githubbroker"
 	"github.com/rivan1986/ai-env/internal/workspace"
 )
 
@@ -211,6 +212,22 @@ type workspaceResult struct {
 	// workspace. False means a workspace with this name was already on
 	// disk and we left it alone (the --force case).
 	Materialized bool
+
+	// OriginPin renders the (host/owner/name) GitHub coordinate the
+	// supervisor recorded into <workspace>/env.yaml at creation time.
+	// Empty when the source repository had no `origin` remote (e.g.
+	// a non-git source or a git repo with no remote configured); the
+	// broker's PR-time check (githubbroker.CheckOriginPin) treats a
+	// missing pin as "refuse PR" so this empty-on-init case is the
+	// pre-existing "you must configure origin before opening a PR"
+	// surface, not a silent allow.
+	//
+	// Plan §4.1: "at `ai-env new`, supervisor records (owner, name,
+	// host) into the workspace's .ai-env/env.yaml metadata as
+	// origin_pin". The pin is re-parsed at PR time so a quietly
+	// rewired origin (e.g. an attacker pointing the workspace at a
+	// different repo after creation) triggers ErrOriginDrift.
+	OriginPin string
 }
 
 // materializeWorkspace creates a worktree- or copy-backed workspace for
@@ -250,11 +267,31 @@ func materializeWorkspace(
 		if err != nil {
 			return workspaceResult{}, err
 		}
+		// Plan §4.1 / Batch 4.1: record the workspace's origin pin so
+		// the broker's PR-time check (CheckOriginPin) can refuse a
+		// silently-rewired remote. The pin is sourced from the
+		// workspace's own `git remote get-url origin` (a worktree shares
+		// the source repo's git config so the URL is identical; a copy
+		// strategy carries no .git and gets no pin, which makes its PRs
+		// fail at the broker layer until the operator hooks up a remote
+		// explicitly). We swallow read / parse errors here: a workspace
+		// without a usable origin is a perfectly valid local-development
+		// shape, and the broker's "no pin → refuse PR" guard already
+		// covers the PR-time case.
+		pinLabel := ""
+		if originURL, perr := githubbroker.WorkspaceOriginURL(info.Path); perr == nil && originURL != "" {
+			if pin, parseErr := githubbroker.ParseOriginRepo(originURL); parseErr == nil {
+				if recErr := githubbroker.RecordOriginPin(info.Path, pin); recErr == nil {
+					pinLabel = pin.String()
+				}
+			}
+		}
 		return workspaceResult{
 			Path:         info.Path,
 			Strategy:     string(info.Strategy),
 			Branch:       info.Branch,
 			Materialized: true,
+			OriginPin:    pinLabel,
 		}, nil
 	}
 
@@ -758,6 +795,9 @@ func printSummary(w io.Writer, s summary) {
 		fmt.Fprintf(w, "  workspace:      %s [%s]\n", s.workspace.Path, state)
 		if s.workspace.Branch != "" {
 			fmt.Fprintf(w, "  branch:         %s\n", s.workspace.Branch)
+		}
+		if s.workspace.OriginPin != "" {
+			fmt.Fprintf(w, "  origin pin:     %s\n", s.workspace.OriginPin)
 		}
 	}
 

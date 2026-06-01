@@ -208,14 +208,14 @@ All five per-subsystem streams stay as **source of truth**. `leaks.jsonl` is the
 
 ### Section 4 — Bucket 3: GitHub broker live
 
-**Batch 4.1 — Origin parser + pinning**
+**Batch 4.1 — Origin parser + pinning** [x]
 - `ParseOriginRepo` as iter-3.
 - **New**: at `ai-env new`, supervisor records `(owner, name, host)` into the workspace's `.ai-env/env.yaml` metadata as `origin_pin`. At PR time `ParseOriginRepo` is called AGAIN and compared against the pin; mismatch → block with `origin_drift` reason.
 - Acceptance: `TestBroker_OriginPinMatchesAtPR`, `TestBroker_OriginDriftBlocks`.
 
-**Batch 4.2 — `BuildBrokerFromSecrets`** — as iter-3; fresh AcquireToken per PushBranch, no mid-call refresh.
+**Batch 4.2 — `BuildBrokerFromSecrets`** [x] — as iter-3; fresh AcquireToken per PushBranch, no mid-call refresh.
 
-**Batch 4.3 — Wire real broker into `cli.RunPR`** — as iter-3.
+**Batch 4.3 — Wire real broker into `cli.RunPR`** [x] — as iter-3.
 
 ### Section 5 — Bucket 5 + sequencing
 

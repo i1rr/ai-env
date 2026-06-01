@@ -185,14 +185,41 @@ func RunPR(opts PROptions) error {
 	renderPRPreview(opts.Stdout, inputs)
 	renderGateResult(opts.Stdout, opts.Stderr, "ai-env pr", verdict)
 
-	// Plan 07 step 10: if no broker is wired, retain the preview-only
-	// behavior plan 06 step 8 documented. An operator on a workstation
-	// without a configured GitHub App / PAT still gets a useful gate
-	// verdict; the broker path lights up once credentials are wired.
-	if opts.Broker == nil {
+	// Plan iter-4 Batch 4.3: build the real broker from the workspace's
+	// secrets.local.yaml + origin pin when the caller did not inject one.
+	// resolveBroker returns (nil, nil) when no credentials are configured
+	// (the documented preview-only fallback) and propagates errors
+	// (ErrPinNotFound, ErrOriginDrift, ErrInvalidOrigin) verbatim so the
+	// CLI fails closed on a misconfigured workspace rather than silently
+	// pushing against an unverified remote.
+	setup, err := resolveBroker(opts, aiEnvDir, inputs.Policy)
+	if err != nil {
+		return fmt.Errorf("ai-env pr: %w", err)
+	}
+	if setup == nil {
+		// Plan 07 step 10: if no broker is wired, retain the preview-only
+		// behavior plan 06 step 8 documented. An operator on a workstation
+		// without a configured GitHub App / PAT still gets a useful gate
+		// verdict; the broker path lights up once credentials are wired.
 		fmt.Fprintln(opts.Stdout, "")
 		fmt.Fprintln(opts.Stdout, "note:      broker not configured; PR push skipped (gate verdict only)")
 		return nil
+	}
+
+	// Thread the resolved broker + repo back through PROptions so the
+	// existing lifecycle helper stays unchanged. Pinning the values on
+	// the local options copy (rather than mutating the caller's struct)
+	// preserves the test-injection contract: opts.Broker the caller
+	// passed in is the same broker runBrokerLifecycle drives.
+	opts.Broker = setup.Broker
+	opts.Repo = setup.Repo
+
+	// When the broker was constructed inside RunPR (not test-injected),
+	// arrange a Close() at exit so the TokenHolder's slots and any
+	// PATSource cached bytes are scrubbed on the way out — Close is
+	// safe to call on any *githubbroker.Broker including a fake.
+	if concrete, ok := setup.Broker.(*githubbroker.Broker); ok {
+		defer concrete.Close()
 	}
 
 	return runBrokerLifecycle(opts, inputs.Diff, pdw)
