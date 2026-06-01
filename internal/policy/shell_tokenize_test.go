@@ -57,7 +57,7 @@ func TestShellTokenize_SingleQuoteLiteral(t *testing.T) {
 }
 
 // TestShellTokenize_DoubleQuoteEscapes pins POSIX double-quote rules:
-// backslash escapes `$`, `\``, `"`, `\\`, and newline; other backslash
+// backslash escapes `$`, `\“, `"`, `\\`, and newline; other backslash
 // sequences are preserved literally; closing quote is required.
 func TestShellTokenize_DoubleQuoteEscapes(t *testing.T) {
 	cases := []struct {

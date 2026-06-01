@@ -868,6 +868,6 @@ func (a writerAdapter) Write(p []byte) (int, error) { return a.w.Write(p) }
 // compile-time checks that the docker fallback satisfies both the
 // generic Backend contract and the network adapter contract.
 var (
-	_ backend.Backend             = (*Backend)(nil)
+	_ backend.Backend              = (*Backend)(nil)
 	_ network.NetworkPolicyAdapter = (*NetworkPolicyAdapter)(nil)
 )

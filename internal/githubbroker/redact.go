@@ -197,9 +197,9 @@ func NewRedactingLogger(inner Logger) Logger {
 // Concurrency: RedactingWriter is safe for concurrent Write / Flush
 // calls. The internal mutex serializes access to the line buffer.
 type RedactingWriter struct {
-	mu   sync.Mutex
-	buf  bytes.Buffer
-	dst  io.Writer
+	mu  sync.Mutex
+	buf bytes.Buffer
+	dst io.Writer
 }
 
 // NewRedactingWriter wraps dst so every line written is passed through

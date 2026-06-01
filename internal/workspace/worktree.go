@@ -56,13 +56,13 @@ func MetadataPath(aiEnvDir, envName string) string {
 // The JSON field names match the format documented in plan 02 ("Env
 // metadata file" section).
 type envMetadata struct {
-	Name         string `json:"name"`
-	Strategy     string `json:"strategy"`
-	Branch       string `json:"branch,omitempty"`
-	SourcePath   string `json:"source_path"`
+	Name          string `json:"name"`
+	Strategy      string `json:"strategy"`
+	Branch        string `json:"branch,omitempty"`
+	SourcePath    string `json:"source_path"`
 	WorkspacePath string `json:"workspace_path"`
-	CreatedAt    string `json:"created_at"`
-	Template     string `json:"template,omitempty"`
+	CreatedAt     string `json:"created_at"`
+	Template      string `json:"template,omitempty"`
 
 	// Copy-strategy-only fields. Left empty for worktree workspaces.
 	BaselinePath string `json:"baseline_path,omitempty"`

@@ -111,9 +111,9 @@ const (
 // formatted message. Callers that need to differentiate failures use
 // errors.As(err, &ContinueError{}) and inspect the Kind field.
 type ContinueError struct {
-	Kind         ContinueErrorKind
-	EnvName      string
-	PreviousID   string
+	Kind          ContinueErrorKind
+	EnvName       string
+	PreviousID    string
 	PreviousState State
 }
 

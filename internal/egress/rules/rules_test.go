@@ -137,10 +137,10 @@ type fakeDriver struct {
 	installErr error
 	uninstErr  error
 
-	mu         sync.Mutex
-	installed  bool
-	calls      []string
-	rollbacks  int
+	mu        sync.Mutex
+	installed bool
+	calls     []string
+	rollbacks int
 }
 
 func (f *fakeDriver) Mode() Mode {

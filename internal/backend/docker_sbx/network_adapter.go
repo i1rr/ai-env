@@ -25,18 +25,18 @@
 //  2. NetworkPolicyAdapter is the supervisor-facing contract from plan
 //     05 step 2. It must:
 //
-//       - Accept the canonical runtime network.NetworkPolicy (not
-//         backend.NetworkPolicy), so the supervisor only ever speaks one
-//         policy shape and audit code can compare what the adapter saw
-//         against what was recorded in run.json.
+//     - Accept the canonical runtime network.NetworkPolicy (not
+//     backend.NetworkPolicy), so the supervisor only ever speaks one
+//     policy shape and audit code can compare what the adapter saw
+//     against what was recorded in run.json.
 //
-//       - Translate the always-block flags into concrete CIDR / host
-//         entries (plan step 5). This is the explicit installation path
-//         the master plan's acceptance criteria assume: a future sbx
-//         release that drops a category shorthand still leaves the
-//         adapter installing every individual range. The boolean-flag
-//         path on Backend.ApplyNetworkPolicy stays as a fallback for
-//         backends that prefer to delegate.
+//     - Translate the always-block flags into concrete CIDR / host
+//     entries (plan step 5). This is the explicit installation path
+//     the master plan's acceptance criteria assume: a future sbx
+//     release that drops a category shorthand still leaves the
+//     adapter installing every individual range. The boolean-flag
+//     path on Backend.ApplyNetworkPolicy stays as a fallback for
+//     backends that prefer to delegate.
 //
 // Both code paths emit deny-by-default in autonomous-mode runs. The
 // adapter never silently degrades: if any step fails, it returns an

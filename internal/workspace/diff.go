@@ -514,4 +514,3 @@ func writeDiffLine(b *strings.Builder, prefix, line string) {
 	b.WriteString("\n")
 	b.WriteString("\\ No newline at end of file\n")
 }
-

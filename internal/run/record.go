@@ -73,11 +73,11 @@ const (
 // it without affecting subsequent calls or other writers.
 func CurrentSchemaVersions() map[string]int {
 	return map[string]int{
-		"lifecycle":         SchemaVersionLifecycle,
-		"network-events":    SchemaVersionNetworkEvents,
-		"shell-commands":    SchemaVersionShellCommands,
-		"policy-decisions":  SchemaVersionPolicyDecisions,
-		"mcp-calls":         SchemaVersionMCPCalls,
+		"lifecycle":        SchemaVersionLifecycle,
+		"network-events":   SchemaVersionNetworkEvents,
+		"shell-commands":   SchemaVersionShellCommands,
+		"policy-decisions": SchemaVersionPolicyDecisions,
+		"mcp-calls":        SchemaVersionMCPCalls,
 	}
 }
 

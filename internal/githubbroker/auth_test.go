@@ -480,4 +480,3 @@ func verifyAppJWT(jwt string, key *rsa.PrivateKey, expectedIss int64) error {
 	}
 	return nil
 }
-

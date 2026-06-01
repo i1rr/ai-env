@@ -184,12 +184,12 @@ func loadScannerConfig(aiEnvDir string) (scanners.Config, error) {
 // level holds the built-in result plus any external secret scanner
 // (gitleaks) result so the export gate sees one consolidated file.
 type secretScanFile struct {
-	RunID             string                 `json:"run_id"`
-	Scanner           string                 `json:"scanner"`
-	Findings          []scanners.Finding     `json:"findings"`
-	EntropyWarnings   []scanners.EntropyWarning `json:"entropy_warnings"`
-	ScannedAt         string                 `json:"scanned_at"`
-	ExternalScanners  []scanners.ScanResult  `json:"external_scanners,omitempty"`
+	RunID            string                    `json:"run_id"`
+	Scanner          string                    `json:"scanner"`
+	Findings         []scanners.Finding        `json:"findings"`
+	EntropyWarnings  []scanners.EntropyWarning `json:"entropy_warnings"`
+	ScannedAt        string                    `json:"scanned_at"`
+	ExternalScanners []scanners.ScanResult     `json:"external_scanners,omitempty"`
 }
 
 func writeSecretScan(runPath string, builtIn scanners.ScanResult, external []scanners.ScanResult) error {
@@ -215,10 +215,10 @@ func writeSecretScan(runPath string, builtIn scanners.ScanResult, external []sca
 // which tools were probed) and the findings produced by the ones that
 // successfully ran.
 type dependencyReportFile struct {
-	RunID            string                     `json:"run_id"`
-	DiscoveredTools  []scanners.ExternalScanner `json:"discovered_tools"`
-	Results          []scanners.ScanResult      `json:"results"`
-	GeneratedAt      string                     `json:"generated_at"`
+	RunID           string                     `json:"run_id"`
+	DiscoveredTools []scanners.ExternalScanner `json:"discovered_tools"`
+	Results         []scanners.ScanResult      `json:"results"`
+	GeneratedAt     string                     `json:"generated_at"`
 }
 
 func writeDependencyReport(runPath string, discovered []scanners.ExternalScanner, results []scanners.ScanResult) error {

@@ -303,4 +303,3 @@ func makeDefaultCreateFn(client *http.Client, baseURL string) func(ctx context.C
 		return PRResult{}, fmt.Errorf("githubbroker: no CreateFn configured; production wiring is provided by a later batch")
 	}
 }
-

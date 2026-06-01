@@ -119,11 +119,11 @@ func loadProtectedMatcher(aiEnvDir string) (*workspace.ProtectedMatcher, error) 
 // and protected-path warnings to stderr. The output has two stable
 // sections so tests and scripts can match on them:
 //
-//   1. A header that names the env, its strategy, and the per-file summary
-//      (one line per changed file, with a "[protected]" suffix on hits).
-//   2. The unified-diff body (suppressed when nameOnly is true). If the
-//      diff is empty, we print a single line saying so instead of an empty
-//      body, so the user can tell "no changes" from "command failed".
+//  1. A header that names the env, its strategy, and the per-file summary
+//     (one line per changed file, with a "[protected]" suffix on hits).
+//  2. The unified-diff body (suppressed when nameOnly is true). If the
+//     diff is empty, we print a single line saying so instead of an empty
+//     body, so the user can tell "no changes" from "command failed".
 //
 // Protected hits are also re-emitted on stderr as a single warning block.
 // Keeping warnings on stderr means scripts that pipe stdout (e.g. into
@@ -169,7 +169,7 @@ func renderDiffResult(stdout, stderr io.Writer, result workspace.DiffResult, nam
 // per-file summary lines up cleanly. The glyphs mirror what git uses in
 // porcelain output to keep the rendering familiar:
 //
-//   A = added, M = modified, D = deleted, ? = unknown (defensive fallback)
+//	A = added, M = modified, D = deleted, ? = unknown (defensive fallback)
 func changeKindGlyph(k workspace.ChangeKind) string {
 	switch k {
 	case workspace.ChangeAdded:

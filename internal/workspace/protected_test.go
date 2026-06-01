@@ -246,20 +246,20 @@ func TestProtectedMatcher_DefaultPatterns(t *testing.T) {
 		// realistic path from that category. A regression in matchSegments
 		// would surface here even if the default list itself is intact.
 		checks := map[string]string{
-			".github/workflows/ci.yml":      ".github/workflows/**",
-			".git/HEAD":                     ".git/**",
-			".env":                          ".env",
-			".env.local":                    ".env.*",
-			"package.json":                  "package.json",
-			"package-lock.json":             "package-lock.json",
-			"yarn.lock":                     "yarn.lock",
-			"pnpm-lock.yaml":                "pnpm-lock.yaml",
-			"Dockerfile":                    "Dockerfile",
-			"docker-compose.yml":            "docker-compose.yml",
-			"terraform/main.tf":             "terraform/**",
-			"infra/k8s/dep.yaml":            "infra/**",
-			"migrations/001_init.sql":       "migrations/**",
-			".ai-env/policy.yaml":           ".ai-env/**",
+			".github/workflows/ci.yml": ".github/workflows/**",
+			".git/HEAD":                ".git/**",
+			".env":                     ".env",
+			".env.local":               ".env.*",
+			"package.json":             "package.json",
+			"package-lock.json":        "package-lock.json",
+			"yarn.lock":                "yarn.lock",
+			"pnpm-lock.yaml":           "pnpm-lock.yaml",
+			"Dockerfile":               "Dockerfile",
+			"docker-compose.yml":       "docker-compose.yml",
+			"terraform/main.tf":        "terraform/**",
+			"infra/k8s/dep.yaml":       "infra/**",
+			"migrations/001_init.sql":  "migrations/**",
+			".ai-env/policy.yaml":      ".ai-env/**",
 		}
 		for path, why := range checks {
 			if !m.Match(path) {

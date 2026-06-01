@@ -180,12 +180,12 @@ func TestStep17_SIGINTPreservesLogsAndPartialDiff(t *testing.T) {
 
 	var userOut bytes.Buffer
 	sup, err := NewSupervisor(SupervisorOptions{
-		RunDir:            runDir.Path,
-		RunID:             runDir.ID,
-		EnvName:           envName,
-		Task:              task,
-		Backend:           "local-process",
-		Agent:             "claude",
+		RunDir:  runDir.Path,
+		RunID:   runDir.ID,
+		EnvName: envName,
+		Task:    task,
+		Backend: "local-process",
+		Agent:   "claude",
 		Command: CommandSpec{
 			Program: "sh",
 			Args:    []string{"-c", script},

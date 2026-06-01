@@ -616,7 +616,7 @@ func NewGateway(registry *Registry, opts *GatewayOptions) (*Gateway, error) {
 		return nil, errors.New("mcp: NewGateway requires a non-nil Registry")
 	}
 	var (
-		logger    CallLogger          = noopCallLogger{}
+		logger    CallLogger = noopCallLogger{}
 		enforcers map[string]ScopeEnforcer
 		clock     func() time.Time = time.Now
 	)
@@ -655,19 +655,19 @@ func (g *Gateway) Registry() *Registry { return g.registry }
 //
 // Pipeline:
 //
-//   1. Registry.Lookup(name): unknown server -> Block with
-//      ErrUnknownServer. Master-plan deny-by-default rule.
-//   2. RegistryServer.Policy == ServerPolicyDeny -> Block with
-//      ErrServerParked. A parked server stays parked at launch.
-//   3. Source / Digest checks against Registry.MatchVersion /
-//      MatchDigest. Empty caller-supplied values skip the dimension;
-//      a mismatch is Block with ErrVersionMismatch / ErrDigestMismatch.
-//   4. Schema-hash compare via Registry.CompareSchemaHash when the
-//      caller supplied a LiveSchemaHash. The compare returns one of
-//      SchemaOutcomeAllow / Record / Warn / Block; the gateway maps
-//      Record -> Allow (with a "first launch, please pin" Reason),
-//      Warn -> Warn, Block -> Block (carries ErrSchemaMismatch),
-//      Allow -> Allow.
+//  1. Registry.Lookup(name): unknown server -> Block with
+//     ErrUnknownServer. Master-plan deny-by-default rule.
+//  2. RegistryServer.Policy == ServerPolicyDeny -> Block with
+//     ErrServerParked. A parked server stays parked at launch.
+//  3. Source / Digest checks against Registry.MatchVersion /
+//     MatchDigest. Empty caller-supplied values skip the dimension;
+//     a mismatch is Block with ErrVersionMismatch / ErrDigestMismatch.
+//  4. Schema-hash compare via Registry.CompareSchemaHash when the
+//     caller supplied a LiveSchemaHash. The compare returns one of
+//     SchemaOutcomeAllow / Record / Warn / Block; the gateway maps
+//     Record -> Allow (with a "first launch, please pin" Reason),
+//     Warn -> Warn, Block -> Block (carries ErrSchemaMismatch),
+//     Allow -> Allow.
 //
 // If steps 1-3 pass and step 4 is skipped (no live hash supplied),
 // the gateway applies the per-server Policy: ServerPolicyWarn
@@ -787,15 +787,15 @@ func (g *Gateway) AuthorizeLaunch(req LaunchRequest) (GatewayDecision, error) {
 //
 // Pipeline:
 //
-//   1. Registry.Lookup -> ErrUnknownServer on miss (Block).
-//   2. ServerPolicyDeny -> ErrServerParked (Block).
-//   3. req.Tool empty -> Block with explicit reason.
-//   4. For each scope kind in server.Scope (in sorted order so the
-//      audit record's ScopeKinds list is deterministic): look up the
-//      enforcer; nil enforcer -> Block with ErrMissingScopeEnforcer;
-//      enforcer error -> Block with ErrScopeViolation wrapping it.
-//   5. If no scope was declared by the server, the call is judged by
-//      the per-server Policy alone: warn -> Warn, allow -> Allow.
+//  1. Registry.Lookup -> ErrUnknownServer on miss (Block).
+//  2. ServerPolicyDeny -> ErrServerParked (Block).
+//  3. req.Tool empty -> Block with explicit reason.
+//  4. For each scope kind in server.Scope (in sorted order so the
+//     audit record's ScopeKinds list is deterministic): look up the
+//     enforcer; nil enforcer -> Block with ErrMissingScopeEnforcer;
+//     enforcer error -> Block with ErrScopeViolation wrapping it.
+//  5. If no scope was declared by the server, the call is judged by
+//     the per-server Policy alone: warn -> Warn, allow -> Allow.
 //
 // The CallRecord written to the audit log carries Tool / Path / Repo /
 // Operation / ScopeKinds so an auditor can reconstruct what the

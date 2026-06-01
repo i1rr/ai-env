@@ -57,8 +57,8 @@ func TestFilesystemScopeEnforcer_AllowsPathInsideWorkspace(t *testing.T) {
 			t.Errorf("path %q rejected: %v", path, err)
 		}
 	}
-	must(ws)                           // root itself
-	must(filepath.Join(ws, "a.txt"))   // direct child (does not exist yet)
+	must(ws)                            // root itself
+	must(filepath.Join(ws, "a.txt"))    // direct child (does not exist yet)
 	must(filepath.Join(ws, "sub", "b")) // nested non-existent child
 	// Create one and re-check to exercise the existing-file path.
 	if err := os.WriteFile(filepath.Join(ws, "a.txt"), []byte("x"), 0o644); err != nil {

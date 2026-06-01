@@ -105,15 +105,15 @@ import (
 //
 // The test exercises the real githubbroker primitives end-to-end:
 //
-//   1. RecordOriginPin writes a real env.yaml under a real workspace
-//      directory.
-//   2. The "live" origin URL is then changed to a different (owner,
-//      name, host) coordinate, simulating an attacker rewriting the
-//      remote via `git remote set-url origin <evil>`.
-//   3. CheckOriginPin re-parses the live URL and compares. The call
-//      must return ErrOriginDrift with a message that surfaces both
-//      the pinned and live coordinates so an operator can see the
-//      delta.
+//  1. RecordOriginPin writes a real env.yaml under a real workspace
+//     directory.
+//  2. The "live" origin URL is then changed to a different (owner,
+//     name, host) coordinate, simulating an attacker rewriting the
+//     remote via `git remote set-url origin <evil>`.
+//  3. CheckOriginPin re-parses the live URL and compares. The call
+//     must return ErrOriginDrift with a message that surfaces both
+//     the pinned and live coordinates so an operator can see the
+//     delta.
 //
 // Three drift shapes are exercised because the plan's pin covers
 // three independent dimensions (owner, name, host); a regression in
@@ -274,14 +274,14 @@ func runRedteamGit(t *testing.T, dir string, args ...string) {
 //
 // Three flows are asserted:
 //
-//   1. server-A + tokA: ALLOW (happy path; without this the test
-//      would be vacuously passing because every call returns block).
-//   2. server-B + tokA: BLOCK with reason="server_token mismatch"
-//      AND the MCPAuthorizer bridge MUST NOT be invoked (the
-//      constant-time token compare rejects before delegation).
-//   3. server-Z (unregistered) + tokA: BLOCK with reason="unknown
-//      server" — distinct verb so operators can tell the two failure
-//      modes apart.
+//  1. server-A + tokA: ALLOW (happy path; without this the test
+//     would be vacuously passing because every call returns block).
+//  2. server-B + tokA: BLOCK with reason="server_token mismatch"
+//     AND the MCPAuthorizer bridge MUST NOT be invoked (the
+//     constant-time token compare rejects before delegation).
+//  3. server-Z (unregistered) + tokA: BLOCK with reason="unknown
+//     server" — distinct verb so operators can tell the two failure
+//     modes apart.
 func TestLeak_AgentForgesMCPCallAcrossServers_Blocked(t *testing.T) {
 	dir := newRedteamControlSocketRunDir(t)
 
@@ -701,14 +701,14 @@ func (t *redteamRewriteTransport) RoundTrip(req *http.Request) (*http.Response, 
 // a python3 wrapper invocation into a shell context (or vice
 // versa). The defense is two-layered:
 //
-//   1. The helper's `program` arg is the path basename the wrapper
-//      writes verbatim; it is validated against the canonical
-//      ShimProgramSet before any work happens. A program outside
-//      the set fails closed with "not in the canonical shadow set".
+//  1. The helper's `program` arg is the path basename the wrapper
+//     writes verbatim; it is validated against the canonical
+//     ShimProgramSet before any work happens. A program outside
+//     the set fails closed with "not in the canonical shadow set".
 //
-//   2. For shimmed programs the helper FORCES argv[0] to the
-//      canonical basename before execveat so the child cannot
-//      observe an attacker-chosen identity.
+//  2. For shimmed programs the helper FORCES argv[0] to the
+//     canonical basename before execveat so the child cannot
+//     observe an attacker-chosen identity.
 //
 // The acceptance test drives the real `ai-env shim-helper shell`
 // subprocess and asserts both layers. The first layer is observable
@@ -793,10 +793,10 @@ func TestLeak_Shim_Argv0Spoof_Rejected(t *testing.T) {
 // scrubber pipeline. We feed it bytes shaped exactly like a
 // real-world stream and assert:
 //
-//   1. The raw secret never appears in the helper's stdout (the
-//      load-bearing leakage assertion).
-//   2. The [REDACTED ...] sentinel does appear (proves the
-//      scrubber actually ran).
+//  1. The raw secret never appears in the helper's stdout (the
+//     load-bearing leakage assertion).
+//  2. The [REDACTED ...] sentinel does appear (proves the
+//     scrubber actually ran).
 //
 // The end-to-end shape is more authentic than the unit-level
 // scrubber tests in cmd/ai-env/shim_helper_mcp_test.go: this drives
@@ -861,8 +861,8 @@ func TestLeak_Shim_SecretInStreamingMCPResponse_Scrubbed(t *testing.T) {
 	//    `s` and never crosses a word boundary.
 	const secret = "sk-ant-AABBCCDDEEFFGGHHIIJJKKLLMM"
 	// Pad to ~40KiB so the secret is well past the first 32KiB read.
-	prefix := strings.Repeat("ABCDEFGH", 5*1024) + " "  // 40KiB + delimiter
-	suffix := " " + strings.Repeat("XYZW", 1024)        // delimiter + 4KiB trailing pad
+	prefix := strings.Repeat("ABCDEFGH", 5*1024) + " " // 40KiB + delimiter
+	suffix := " " + strings.Repeat("XYZW", 1024)       // delimiter + 4KiB trailing pad
 	payload := prefix + secret + suffix
 
 	// 4) Drive the real `ai-env shim-helper mcp stream-server`

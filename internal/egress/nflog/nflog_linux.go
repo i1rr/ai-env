@@ -179,7 +179,7 @@ func newLinuxSource(ctx context.Context, opts Options) (kernelSource, error) {
 // here rather than via `golang.org/x/sys/unix` to keep the new-dep
 // surface zero.
 func setns(fd int, nstype int) error {
-	_, _, errno := syscall.Syscall(syscall.SYS_SETNS, uintptr(fd), uintptr(nstype), 0)
+	_, _, errno := syscall.Syscall(sysSetns, uintptr(fd), uintptr(nstype), 0)
 	if errno != 0 {
 		return errno
 	}

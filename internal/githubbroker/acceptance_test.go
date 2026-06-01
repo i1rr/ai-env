@@ -458,9 +458,9 @@ func TestAcceptance_PRCreatedOnlyFromAIEnvBranch(t *testing.T) {
 	// Negative cases: each must surface a sentinel wrap (so
 	// errors.Is matches) and must NOT advance to AcquireToken.
 	negativeCases := []struct {
-		name       string
-		branch     string
-		wantErrIs  error
+		name      string
+		branch    string
+		wantErrIs error
 	}{
 		{"main rejected", "main", ErrInvalidBranchPrefix},
 		{"master rejected", "master", ErrInvalidBranchPrefix},

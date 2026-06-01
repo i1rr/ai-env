@@ -26,11 +26,11 @@ func seedNonGitSource(t *testing.T) (string, map[string]string) {
 	// the seed wrote. Keys are relative paths inside the source; values are
 	// the exact bytes the file should contain after the copy.
 	files := map[string]string{
-		"README.md":              "non-git project\n",
-		"src/main.go":            "package main\n\nfunc main() {}\n",
-		"src/util/helper.go":     "package util\n\nfunc Helper() string { return \"ok\" }\n",
-		"docs/notes.txt":         "some notes\nwith two lines\n",
-		"config/settings.yaml":   "key: value\nnested:\n  inner: 1\n",
+		"README.md":            "non-git project\n",
+		"src/main.go":          "package main\n\nfunc main() {}\n",
+		"src/util/helper.go":   "package util\n\nfunc Helper() string { return \"ok\" }\n",
+		"docs/notes.txt":       "some notes\nwith two lines\n",
+		"config/settings.yaml": "key: value\nnested:\n  inner: 1\n",
 	}
 
 	for rel, content := range files {

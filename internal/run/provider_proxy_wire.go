@@ -58,10 +58,10 @@ import (
 //
 //   - "provider"      — the proxy's Provider() value
 //   - "listen_addr"   — the proxy's ListenAddr() (host:port for TCP,
-//                       socket path for UnixSocket)
+//     socket path for UnixSocket)
 //   - "upstream_host" — the proxy's UpstreamHost() (the canonical
-//                       provider host the upstream-Host allowlist
-//                       pins)
+//     provider host the upstream-Host allowlist
+//     pins)
 //   - "reachability"  — the proxy's BindMode() stringified
 //
 // Returns the started proxies slice so the caller can pass it to

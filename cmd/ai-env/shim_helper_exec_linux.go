@@ -150,7 +150,7 @@ func execveatAtEmptyPath(fd int, argv, env []string) error {
 		return err
 	}
 	_, _, errno := syscall.Syscall6(
-		syscall.SYS_EXECVEAT,
+		sysExecveat,
 		uintptr(fd),
 		uintptr(unsafe.Pointer(emptyPath)),
 		uintptr(unsafe.Pointer(&argvp[0])),

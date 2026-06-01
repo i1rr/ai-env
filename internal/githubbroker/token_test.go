@@ -19,9 +19,9 @@ import (
 // capped, zero / negative falls back to DefaultTokenTTL.
 func TestClampTTL_AppliesPolicyBounds(t *testing.T) {
 	cases := []struct {
-		name     string
-		in       time.Duration
-		want     time.Duration
+		name string
+		in   time.Duration
+		want time.Duration
 	}{
 		{"zero falls back to default", 0, DefaultTokenTTL},
 		{"negative falls back to default", -1 * time.Second, DefaultTokenTTL},

@@ -264,12 +264,12 @@ func collectLeakRecords(runDir, runID string) ([]LeakRecord, error) {
 // patterns distinct.
 func dedupLeakRecords(records []LeakRecord) []LeakRecord {
 	type key struct {
-		source     LeakSource
-		line       int
-		policyEvt  string
-		vector     int
-		pattern    string
-		findingID  string
+		source    LeakSource
+		line      int
+		policyEvt string
+		vector    int
+		pattern   string
+		findingID string
 	}
 	seen := make(map[key]struct{}, len(records))
 	out := make([]LeakRecord, 0, len(records))

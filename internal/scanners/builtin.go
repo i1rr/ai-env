@@ -583,13 +583,13 @@ func BuiltInSecretPatterns() []SecretPattern {
 //
 // Pattern classes mirror the plan 06 enumeration:
 //
-//	1. Provider API keys: OpenAI, Anthropic, GitHub, npm, PyPI, AWS,
-//	   Google Cloud, Azure, Slack, Stripe.
-//	2. Private key headers: RSA, EC, OPENSSH (and the generic
-//	   "BEGIN PRIVATE KEY" form).
-//	3. .env-style assignments where the key name implies a secret
-//	   (*_SECRET=, *_TOKEN=, *_KEY=, PASSWORD=) with a non-empty
-//	   value.
+//  1. Provider API keys: OpenAI, Anthropic, GitHub, npm, PyPI, AWS,
+//     Google Cloud, Azure, Slack, Stripe.
+//  2. Private key headers: RSA, EC, OPENSSH (and the generic
+//     "BEGIN PRIVATE KEY" form).
+//  3. .env-style assignments where the key name implies a secret
+//     (*_SECRET=, *_TOKEN=, *_KEY=, PASSWORD=) with a non-empty
+//     value.
 func builtinPatterns() []patternRule {
 	rules := []patternRule{
 		// --- provider API keys -----------------------------------------

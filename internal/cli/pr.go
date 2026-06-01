@@ -478,4 +478,3 @@ func renderPRPreview(stdout io.Writer, inputs exportInputs) {
 		fmt.Fprintf(stdout, "  %s  %s%s\n", changeKindGlyph(f.Change), f.Path, marker)
 	}
 }
-

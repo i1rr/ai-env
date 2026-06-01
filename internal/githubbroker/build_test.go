@@ -344,4 +344,3 @@ func TestBroker_FreshAcquireTokenPerPushBranch(t *testing.T) {
 		t.Errorf("PushFn called %d times, want 2", len(seenSecrets))
 	}
 }
-

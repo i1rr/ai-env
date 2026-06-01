@@ -52,12 +52,12 @@ func TestNewGitHubScopeEnforcer_RejectsMalformedRepo(t *testing.T) {
 
 func TestNewGitHubScopeEnforcer_NormalizesCommonForms(t *testing.T) {
 	cases := map[string]string{
-		"Owner/Repo":                          "owner/repo",
-		"github.com/Owner/Repo":               "owner/repo",
-		"https://github.com/Owner/Repo":       "owner/repo",
-		"https://github.com/Owner/Repo.git":   "owner/repo",
-		"git@github.com:Owner/Repo.git":       "owner/repo",
-		"  Owner/Repo  ":                      "owner/repo",
+		"Owner/Repo":                        "owner/repo",
+		"github.com/Owner/Repo":             "owner/repo",
+		"https://github.com/Owner/Repo":     "owner/repo",
+		"https://github.com/Owner/Repo.git": "owner/repo",
+		"git@github.com:Owner/Repo.git":     "owner/repo",
+		"  Owner/Repo  ":                    "owner/repo",
 	}
 	for in, want := range cases {
 		e, err := NewGitHubScopeEnforcer(in)

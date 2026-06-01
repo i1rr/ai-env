@@ -8,12 +8,12 @@ package config
 // workspace strategy, sandbox backend selection, runtime supervision
 // limits, and logging policy.
 type AIEnvConfig struct {
-	Version     int                  `yaml:"version"`
-	Project     ProjectSection       `yaml:"project"`
-	Workspace   WorkspaceSection     `yaml:"workspace"`
-	Sandbox     SandboxSection       `yaml:"sandbox"`
-	Supervision SupervisionSection   `yaml:"supervision"`
-	Logging     LoggingSection       `yaml:"logging"`
+	Version     int                `yaml:"version"`
+	Project     ProjectSection     `yaml:"project"`
+	Workspace   WorkspaceSection   `yaml:"workspace"`
+	Sandbox     SandboxSection     `yaml:"sandbox"`
+	Supervision SupervisionSection `yaml:"supervision"`
+	Logging     LoggingSection     `yaml:"logging"`
 }
 
 // ProjectSection identifies the environment and its source project.

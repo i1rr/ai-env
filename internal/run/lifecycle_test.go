@@ -619,4 +619,3 @@ func TestLifecycleWriter_DefaultsToTimeNow(t *testing.T) {
 		t.Errorf("timestamp %q is not RFC3339: %v", evt.Timestamp, err)
 	}
 }
-

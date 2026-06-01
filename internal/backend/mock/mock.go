@@ -111,16 +111,16 @@ type envState struct {
 // relevant to that method. Unused fields are left at their zero value
 // so tests can assert on a small subset.
 type Call struct {
-	Method  string
-	EnvID   string
-	Spec    backend.EnvSpec
-	Command backend.Command
+	Method   string
+	EnvID    string
+	Spec     backend.EnvSpec
+	Command  backend.Command
 	ExecOpts backend.ExecOptions
-	Signal  os.Signal
-	Timeout time.Duration
-	Src     string
-	Dest    string
-	Policy  backend.NetworkPolicy
+	Signal   os.Signal
+	Timeout  time.Duration
+	Src      string
+	Dest     string
+	Policy   backend.NetworkPolicy
 }
 
 // New returns a fresh mock with sensible defaults: Detect reports the

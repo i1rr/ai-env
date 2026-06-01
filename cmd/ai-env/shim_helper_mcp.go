@@ -388,4 +388,3 @@ func runMCPPipeline(src io.Reader, dst io.Writer, scrubber *mcpScrubber) error {
 		}
 	}
 }
-

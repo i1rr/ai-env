@@ -57,8 +57,8 @@ type stubBackend struct {
 	// readStdin, when true, causes Exec to drain the supplied stdin
 	// into stdinSeen so the supervisor's stdin plumbing can be
 	// asserted on.
-	readStdin  bool
-	stdinSeen  []byte
+	readStdin bool
+	stdinSeen []byte
 }
 
 type stopCall struct {
@@ -129,8 +129,8 @@ func (b *stubBackend) Stop(envID string, sig os.Signal, timeout time.Duration) e
 	return nil
 }
 
-func (b *stubBackend) CopyIn(envID, src, dest string) error                 { return nil }
-func (b *stubBackend) CopyOut(envID, src, dest string) error                { return nil }
+func (b *stubBackend) CopyIn(envID, src, dest string) error                           { return nil }
+func (b *stubBackend) CopyOut(envID, src, dest string) error                          { return nil }
 func (b *stubBackend) ApplyNetworkPolicy(envID string, p backend.NetworkPolicy) error { return nil }
 func (b *stubBackend) Stats(envID string) (backend.ResourceStats, error) {
 	return backend.ResourceStats{Available: false}, nil
@@ -400,6 +400,6 @@ func TestNewSupervisor_BackendEnvIDRequired(t *testing.T) {
 // bytes / io imports load-bearing in case a future test trims the
 // other usages.
 var (
-	_ io.Writer    = (*bytes.Buffer)(nil)
-	_              = fmt.Sprintf
+	_ io.Writer = (*bytes.Buffer)(nil)
+	_           = fmt.Sprintf
 )

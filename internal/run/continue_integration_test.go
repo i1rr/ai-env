@@ -162,12 +162,12 @@ func TestContinueIntegration_EndToEnd(t *testing.T) {
 	// from a goroutine gives us a deterministic StateKilledByUser
 	// landing and exercises the same finalize path the real CLI uses.
 	prevSup, err := NewSupervisor(SupervisorOptions{
-		RunDir:            prevDir.Path,
-		RunID:             prevDir.ID,
-		EnvName:           envName,
-		Task:              prevTask,
-		Backend:           "local-process",
-		Agent:             "claude",
+		RunDir:  prevDir.Path,
+		RunID:   prevDir.ID,
+		EnvName: envName,
+		Task:    prevTask,
+		Backend: "local-process",
+		Agent:   "claude",
 		// A child that produces some output, then sleeps long enough for
 		// the goroutine below to send Cancel. The supervisor's stop
 		// path will then signal the child and reap it.

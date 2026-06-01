@@ -114,12 +114,12 @@ func ClampTTL(requested time.Duration) time.Duration {
 // struct, so subsequent Revoke calls do not race with the caller's
 // HTTP request.
 type tokenSlot struct {
-	kind      TokenKind
-	secret    []byte
-	issuedAt  time.Time
-	ttl       time.Duration
-	revoked   bool
-	revokeFn  func() error
+	kind     TokenKind
+	secret   []byte
+	issuedAt time.Time
+	ttl      time.Duration
+	revoked  bool
+	revokeFn func() error
 }
 
 // expiresAt returns the wall-clock cutoff for the slot. Issuers report
@@ -163,7 +163,7 @@ func (s *tokenSlot) expired(now time.Time) bool {
 // mutex so a future async revoke hook (e.g. an `ai-env destroy` that
 // races the run finalizer) cannot corrupt the slot map.
 type TokenHolder struct {
-	mu   sync.Mutex
+	mu    sync.Mutex
 	slots map[string]*tokenSlot
 }
 
@@ -405,4 +405,3 @@ func zeroBytes(b []byte) {
 		b[i] = 0
 	}
 }
-

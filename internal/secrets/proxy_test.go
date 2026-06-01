@@ -78,13 +78,13 @@ func TestProxy_InjectsAnthropicAuthHeader(t *testing.T) {
 	const token = "sk-ant-test-token-abcdef0123456789"
 
 	var (
-		mu          sync.Mutex
-		gotAPIKey   string
-		gotAuth     string
-		gotPath     string
-		gotMethod   string
-		gotHostHdr  string
-		gotForwHdr  string
+		mu         sync.Mutex
+		gotAPIKey  string
+		gotAuth    string
+		gotPath    string
+		gotMethod  string
+		gotHostHdr string
+		gotForwHdr string
 	)
 
 	upstream, upstreamURL := startTestUpstream(t, func(w http.ResponseWriter, r *http.Request) {

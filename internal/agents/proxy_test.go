@@ -9,11 +9,11 @@
 // step: set ANTHROPIC_BASE_URL or OPENAI_BASE_URL when proxy mode is
 // active. Two layers of behavior need real coverage:
 //
-//   1. NewProviderProxyProbe / WireProviderProxy turn a running proxy
-//      into the EnvironmentProbe fields the resolver consumes.
-//   2. ResolveCredentialMode, given that probe, emits the correct
-//      base-URL env var (and only the matching one) so the agent
-//      process started by the launcher is pointed at the proxy.
+//  1. NewProviderProxyProbe / WireProviderProxy turn a running proxy
+//     into the EnvironmentProbe fields the resolver consumes.
+//  2. ResolveCredentialMode, given that probe, emits the correct
+//     base-URL env var (and only the matching one) so the agent
+//     process started by the launcher is pointed at the proxy.
 //
 // The tests also confirm the port released on Stop is re-bindable so a
 // supervisor that tears the proxy down between runs does not leak.

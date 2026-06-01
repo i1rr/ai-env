@@ -20,7 +20,7 @@
 //
 // Running the suite:
 //
-//   AI_ENV_ACCEPTANCE=1 go test -tags=acceptance ./tests/acceptance/...
+//	AI_ENV_ACCEPTANCE=1 go test -tags=acceptance ./tests/acceptance/...
 //
 // Design rules:
 //
@@ -1907,6 +1907,6 @@ func shellQuote(s string) string {
 // otherwise leave a dangling import that breaks the rest of the suite's
 // build.
 var (
-	_ = mock.New
+	_                 = mock.New
 	_ backend.Backend = (*mock.Backend)(nil)
 )

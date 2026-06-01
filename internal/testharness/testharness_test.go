@@ -356,7 +356,7 @@ func TestAssertNoSecretsLeakedInFile_FlagsLeak(t *testing.T) {
 	// records failures. The standard library's testing.T does not
 	// expose its failure state to other tests; we reuse the
 	// ContainsAnySecret primitive instead.
-	if _, ok := ContainsAnySecret([]byte("contents with "+fixture.Value)); !ok {
+	if _, ok := ContainsAnySecret([]byte("contents with " + fixture.Value)); !ok {
 		t.Errorf("ContainsAnySecret failed to spot the seeded leak; AssertNoSecretsLeakedInFile would also miss it")
 	}
 }

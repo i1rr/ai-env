@@ -457,4 +457,3 @@ func scanScriptHighRisk(content []byte) string {
 	}
 	return ""
 }
-

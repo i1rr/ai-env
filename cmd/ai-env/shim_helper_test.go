@@ -119,12 +119,12 @@ func TestShimHelperSocketPath_DefaultsToCanonical(t *testing.T) {
 // CR/LF/spaces from the end without disturbing the body.
 func TestTrimToken_StripsTrailingWhitespace(t *testing.T) {
 	cases := map[string]string{
-		"hello\n":           "hello",
-		"hello\r\n":         "hello",
-		"hello  ":           "hello",
-		"hello":             "hello",
-		"":                  "",
-		"\n":                "",
+		"hello\n":          "hello",
+		"hello\r\n":        "hello",
+		"hello  ":          "hello",
+		"hello":            "hello",
+		"":                 "",
+		"\n":               "",
 		"some token  \r\n": "some token",
 	}
 	for in, want := range cases {

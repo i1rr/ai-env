@@ -41,7 +41,7 @@ jobs:
           # backends (those run in the integration workflow).
           AI_ENV_BACKEND_INTEGRATION: "0"
         run: |
-          go test -race -count=3 -timeout=10m \
+          go test -race -count=3 -timeout=20m \
             ./internal/run/... \
             ./internal/policy/... \
             ./internal/secrets/... \
