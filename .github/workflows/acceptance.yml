@@ -1,0 +1,70 @@
+name: Acceptance
+
+# Red-team scenario + master-plan section 32 acceptance suite. Each
+# *_test.go file under tests/acceptance/ is gated with the
+# `//go:build acceptance` tag and additionally requires
+# AI_ENV_ACCEPTANCE=1 in the environment. The two-gate pattern
+# (static build tag + dynamic env var) mirrors how
+# AI_ENV_BACKEND_INTEGRATION gates the backend integration tests, so
+# operators only need to learn one idiom. The default
+# `go test ./...` invocation skips this suite cleanly because the
+# build tag is not set.
+#
+# Plan reference: plan.md "Batch 10.6 — CI configuration" and
+# acceptance criterion 2 ("go test -tags=acceptance
+# ./tests/acceptance/... passes on Linux"). The plan text reads
+# `-tags=integration` in one spot but the source of truth is the
+# `//go:build acceptance` directive in tests/acceptance/*.go, so
+# this workflow uses `-tags=acceptance` (the tag the files actually
+# require to compile).
+#
+# Runner notes:
+#   - The suite shells out to a freshly-built `ai-env` binary
+#     (see tests/acceptance/section32_test.go::TestMain) so it
+#     needs a normal Linux runner, not a privileged one. Tests
+#     that require docker / podman / sbx skip themselves via
+#     `exec.LookPath` checks rather than failing.
+#   - macOS is intentionally skipped here: pflog-dependent tests
+#     and the privileged-Linux backend cases would all be
+#     skips, so the cost is not worth the signal. Local
+#     developers on macOS run this suite directly.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  acceptance:
+    name: Acceptance suite (linux, -tags=acceptance)
+    runs-on: ubuntu-latest
+    env:
+      AI_ENV_ACCEPTANCE: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Show available backends
+        # Diagnostic only: tests that need a particular backend
+        # call exec.LookPath and t.Skip when the binary is
+        # missing, so this just records what was present.
+        run: |
+          echo "docker:  $(command -v docker  || echo 'not installed')"
+          echo "podman:  $(command -v podman  || echo 'not installed')"
+          echo "sbx:     $(command -v sbx     || echo 'not installed')"
+
+      - name: go test (acceptance suite)
+        run: |
+          go test -tags=acceptance -timeout=20m \
+            ./tests/acceptance/...

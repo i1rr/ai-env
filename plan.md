@@ -298,7 +298,7 @@ Acceptance:
 
 **Batch 10.5 — `ai-env doctor`** [x] — remediation table covers EVERY lifecycle verb + capability detection result + new verbs from iter-3/iter-4 (`shim_coverage_degraded`, `helper_rpc_aborted`, `transcript_parser_error`, `gateway_secret_response`, `mcp_config_neutralized`, `origin_drift`).
 
-**Batch 10.6 — CI configuration** — as iter-3.
+**Batch 10.6 — CI configuration** [x] — as iter-3.
 
 ## Acceptance criteria for the plan
 
