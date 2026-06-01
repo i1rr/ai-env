@@ -229,7 +229,7 @@ All five per-subsystem streams stay as **source of truth**. `leaks.jsonl` is the
 
 **Batch 5.4 — iptables / pf rule lifecycle** [x] — as iter-3.
 
-**Batch 5.5 — Supervisor sequencing (CANONICAL)**
+**Batch 5.5 — Supervisor sequencing (CANONICAL)** [x]
 
 **Pre-launch (11 steps):**
 1. Open lifecycle writer; `chmod runDir 0700`; **write `schema_versions` map to run.json now** (not at finalize).

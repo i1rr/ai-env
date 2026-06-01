@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/rivan1986/ai-env/internal/backend"
+	"github.com/rivan1986/ai-env/internal/egress"
+	"github.com/rivan1986/ai-env/internal/egress/rules"
 	"github.com/rivan1986/ai-env/internal/network"
 	"github.com/rivan1986/ai-env/internal/policy"
 	"github.com/rivan1986/ai-env/internal/secrets"
@@ -409,6 +411,114 @@ type SupervisorOptions struct {
 	// started listener tears down first.
 	ProviderProxies []*secrets.ProviderProxy
 
+	// ControlSocket is the per-run control socket the supervisor starts
+	// at canonical pre-launch step 2 (Plan §5.5). Nil = skip the step
+	// (legacy callers that do not stand up a per-run control socket
+	// keep their existing behavior). When non-nil the supervisor calls
+	// Start at step 2, emits `control_socket_started`, flips
+	// AcceptingShutdown at teardown step 2, and calls Stop at teardown
+	// step 8 with a matching `control_socket_stopped` verb.
+	//
+	// The supervisor does NOT mint the socket itself: the construction
+	// site (NewControlSocket + RegisterServerToken) is the caller's
+	// responsibility so the same socket can be referenced by the
+	// MCPGatewayMaterializer and by the agent-env wiring without the
+	// supervisor learning the per-server registry.
+	ControlSocket *ControlSocket
+
+	// EgressObserver is the per-run packet-log reader the supervisor
+	// attaches at canonical pre-launch step 5 (Plan §5.5). Nil = skip
+	// the step entirely. Concrete observers (Linux NFLOG, macOS pflog)
+	// are constructed by `egress.ChooseObserver` in a future batch;
+	// today the supervisor accepts any value that implements
+	// `egress.EgressObserver`.
+	//
+	// Start failures are gated by EgressObserverMode: Strict aborts the
+	// run with StateFailedBackend; Auto / Disabled degrade by emitting
+	// `observer_unavailable` and continuing. The supervisor stops the
+	// observer at teardown step 4 with a matching `observer_stopped`
+	// verb.
+	EgressObserver egress.EgressObserver
+
+	// EgressObserverMode is the operator-configured policy that gates
+	// observer-start failures. Defaults to
+	// `egress.DefaultEgressObserverMode` (Auto) when zero-valued.
+	// Strict requires the observer; Auto / Disabled degrade.
+	EgressObserverMode egress.EgressObserverMode
+
+	// EgressRules is the per-run iptables / pf rule lifecycle the
+	// supervisor installs at canonical pre-launch step 7 (Plan §5.5)
+	// and uninstalls at teardown step 3. Nil = skip the step (legacy
+	// callers).
+	//
+	// Install failures are fail-closed (StateFailedPolicy /
+	// StopReasonPolicyFailure) per the plan's "Fail closed: if the
+	// backend cannot apply the requested network policy, autonomous
+	// mode must fail" rule. `rules.ErrUnsupportedOS` is treated as a
+	// graceful no-op so a non-Linux/non-Darwin host (CI runner) can
+	// still run the supervisor without spurious aborts.
+	EgressRules *rules.Lifecycle
+
+	// MCPGatewayMaterializer is the closure invoked at canonical
+	// pre-launch step 9 (Plan §5.5) to write the per-run
+	// `mcp-servers.json` + `mcp-servers.real.json` + `.helper-token`
+	// files. The closure receives the configured ControlSocket so it
+	// can mint per-server tokens; production callers pass
+	// `MaterializePerRunMCPConfig`'s closure form. A non-nil closure
+	// that returns an error aborts the run with StateFailedBackend.
+	//
+	// The supervisor stores the returned PerRunMCPConfig on the
+	// supervisor's `perRunMCP` field so a future teardown step can
+	// reference the on-disk paths; today the field is only consumed by
+	// the `gateway_started` lifecycle verb's metadata.
+	MCPGatewayMaterializer func(*ControlSocket) (PerRunMCPConfig, error)
+
+	// MCPGatewayCloser is the closure invoked at canonical teardown
+	// step 6 (Plan §5.5) to stop the MCP gateway logger / writer. The
+	// production caller passes `RunGateway.Close` (which lives in
+	// internal/cli to avoid an import cycle into the run package). A
+	// nil closer is fine when the materializer did not allocate a
+	// closeable resource (e.g. test fixtures that only write the
+	// on-disk files via the materializer).
+	MCPGatewayCloser func() error
+
+	// WorkspaceMCPRoot is the absolute path of the workspace directory
+	// the supervisor inspects at canonical pre-launch step 3 (Plan §5.5)
+	// for workspace-local MCP configs (`.mcp.json`,
+	// `.claude/settings.json` with `mcpServers`). When non-empty the
+	// supervisor renames matching files to `.ai-env-shadowed`,
+	// records `mcp_config_neutralized` lifecycle verbs, and restores
+	// the files at canonical teardown step 7. An empty path skips the
+	// shadow step entirely (legacy callers without a workspace
+	// context).
+	WorkspaceMCPRoot string
+
+	// BackendCreate is the closure invoked at canonical pre-launch
+	// step 3 (Plan §5.5) to call `backend.Create` with the full
+	// BindMounts list. The supervisor calls this AFTER the workspace
+	// MCP shadow has been recorded so the bind-mount layout includes
+	// the shadowed files' targets. A non-nil closure that returns an
+	// error aborts with StateFailedBackend.
+	//
+	// Nil = skip; legacy callers that drive backend.Create out of band
+	// (the existing plan-04 supervisor wires Backend.Exec only) keep
+	// their existing behavior.
+	BackendCreate func() error
+
+	// BackendStart is the closure invoked at canonical pre-launch
+	// step 5 (Plan §5.5) to call `backend.Start` so the netns gets
+	// assigned before the EgressObserver attaches. Nil = skip; the
+	// EgressObserver still attaches at the same canonical point, but
+	// it must already be configured against a netns the caller stood
+	// up out of band.
+	BackendStart func() error
+
+	// BackendDestroy is the closure invoked at canonical teardown
+	// step 7 (Plan §5.5) to call `backend.Stop + Destroy`. Errors are
+	// surfaced via UserOutput as warnings (never escalated). Nil =
+	// skip; legacy callers handle Destroy at the CLI level.
+	BackendDestroy func() error
+
 	// ShimHelperCmd is the command line the wrapper scripts re-exec via
 	// `exec` inside the sandbox. Defaults to DefaultShimHelperCmd
 	// (`/usr/local/bin/ai-env shim-helper`) when empty: that is the
@@ -606,6 +716,38 @@ type Supervisor struct {
 	// can stop them in reverse order with the matching proxy_stopped
 	// lifecycle verbs. Empty / nil when no proxies were configured.
 	startedProxies []*secrets.ProviderProxy
+
+	// controlSocketStarted is true between a successful
+	// ControlSocket.Start (canonical pre-launch step 2) and
+	// ControlSocket.Stop (canonical teardown step 8). Tracked so the
+	// rollback / teardown helpers can decide whether the `_stopped`
+	// verb fires.
+	controlSocketStarted bool
+
+	// observerStarted is the symmetric flag for the EgressObserver
+	// (canonical step 5 / teardown step 4).
+	observerStarted bool
+
+	// rulesInstalled is true between a successful EgressRules.Install
+	// (canonical step 7) and Uninstall (canonical teardown step 3).
+	rulesInstalled bool
+
+	// gatewayStarted is true between a successful
+	// MCPGatewayMaterializer (canonical step 9) and the matching
+	// teardown step 6.
+	gatewayStarted bool
+
+	// shadowEntries records the workspace MCP-config files the
+	// supervisor renamed to `.ai-env-shadowed` at canonical step 3.
+	// finalizeTerminal restores them at canonical teardown step 7 via
+	// RestoreWorkspaceMCPConfig.
+	shadowEntries []ShadowEntry
+
+	// perRunMCP captures the PerRunMCPConfig the MCPGatewayMaterializer
+	// returned. Surfaced on the supervisor for future readers (e.g. a
+	// teardown step that emits per-server cleanup verbs); today it
+	// only feeds the `gateway_started` verb metadata.
+	perRunMCP PerRunMCPConfig
 }
 
 // terminalCause is the internal reason the main loop will pick for the
@@ -1019,69 +1161,12 @@ func (s *Supervisor) Run(ctx context.Context) (SupervisorResult, error) {
 		}()
 	}
 
-	// Walk the setup stages. Each transition is a single helper call
-	// that handles the lifecycle event + run.json snapshot. If any
-	// stage transition fails (lifecycle write failure, run.json write
-	// failure) the supervisor surfaces it: we cannot proceed without
-	// the lifecycle trail being durable.
-	if err := s.enterSetup(StatePreparingWorkspace); err != nil {
-		return s.finalizeTerminal(terminalCause{state: StateFailedBackend, reason: StopReasonBackendFailure, note: "lifecycle write failed during preparing_workspace"}, exitInfo{}), err
-	}
-	if s.checkCancel() {
-		return s.finalizeTerminal(s.takeTerminalCause(terminalCause{state: StateKilledByUser, reason: StopReasonSignal}), exitInfo{}), nil
-	}
-	if err := s.enterSetup(StateStartingBackend); err != nil {
-		return s.finalizeTerminal(terminalCause{state: StateFailedBackend, reason: StopReasonBackendFailure, note: "lifecycle write failed during starting_backend"}, exitInfo{}), err
-	}
-	if s.checkCancel() {
-		return s.finalizeTerminal(s.takeTerminalCause(terminalCause{state: StateKilledByUser, reason: StopReasonSignal}), exitInfo{}), nil
-	}
-	if err := s.enterSetup(StateApplyingPolicy); err != nil {
-		return s.finalizeTerminal(terminalCause{state: StateFailedPolicy, reason: StopReasonPolicyFailure, note: "lifecycle write failed during applying_policy"}, exitInfo{}), err
-	}
-	if s.checkCancel() {
-		return s.finalizeTerminal(s.takeTerminalCause(terminalCause{state: StateKilledByUser, reason: StopReasonSignal}), exitInfo{}), nil
-	}
-	// Fail-closed network policy install (plan 05 step 4 / master plan
-	// section 18). When a NetworkPolicyAdapter is configured the
-	// supervisor calls Apply here, after the StateApplyingPolicy
-	// lifecycle event has been recorded so an audit reader sees the
-	// failure attributed to the policy stage. A non-nil error aborts the
-	// run with StateFailedPolicy / StopReasonPolicyFailure; the run does
-	// NOT proceed to StateStartingAgent. Apply is the supervisor's only
-	// hook for installing egress rules in v0.1, so a silent skip on
-	// error would be the silent-degrade the plan explicitly forbids.
-	if err := s.applyNetworkPolicy(); err != nil {
-		cause := terminalCause{state: StateFailedPolicy, reason: StopReasonPolicyFailure, note: fmt.Sprintf("apply network policy: %v", err)}
-		return s.finalizeTerminal(cause, exitInfo{}), nil
-	}
-	if s.checkCancel() {
-		return s.finalizeTerminal(s.takeTerminalCause(terminalCause{state: StateKilledByUser, reason: StopReasonSignal}), exitInfo{}), nil
-	}
-	// Plan §5.5 step 8 / Batch 2.3: start each ProviderProxy after the
-	// network policy is installed (so the egress rules already tolerate
-	// the per-proxy carve-outs) and before the agent is launched (so
-	// XXX_BASE_URL points at a live listener). Bind failure is
-	// fail-closed per Bucket 2's "Hard fail-closed on unreachable":
-	// stop the proxies that did start and abort with StateFailedPolicy
-	// (the proxy bind is part of the applying-policy window in the
-	// state machine; the state transition table forbids
-	// applying_policy -> failed_backend, and the plan treats the
-	// per-proxy carve-outs as a policy install component).
-	started, err := s.startProviderProxies()
-	if err != nil {
-		cause := terminalCause{state: StateFailedPolicy, reason: StopReasonPolicyFailure, note: fmt.Sprintf("start provider proxy: %v", err)}
-		return s.finalizeTerminal(cause, exitInfo{}), nil
-	}
-	s.startedProxies = started
-	if s.checkCancel() {
-		return s.finalizeTerminal(s.takeTerminalCause(terminalCause{state: StateKilledByUser, reason: StopReasonSignal}), exitInfo{}), nil
-	}
-	if err := s.enterSetup(StateStartingAgent); err != nil {
-		return s.finalizeTerminal(terminalCause{state: StateFailedAgent, reason: StopReasonAgentFailure, note: "lifecycle write failed during starting_agent"}, exitInfo{}), err
-	}
-	if s.checkCancel() {
-		return s.finalizeTerminal(s.takeTerminalCause(terminalCause{state: StateKilledByUser, reason: StopReasonSignal}), exitInfo{}), nil
+	// Plan §5.5 — canonical 11-step pre-launch sequence. The helper
+	// walks every step in strict order, performs fail-closed rollback
+	// on any failure, and returns a sequenceError carrying the
+	// terminal cause the run should land on.
+	if seqErr := s.preLaunchSequence(ctx); seqErr != nil {
+		return s.finalizeTerminal(seqErr.terminalCause(), exitInfo{}), nil
 	}
 
 	// Launch the child. A launch failure (e.g. binary missing) is a
@@ -1802,23 +1887,18 @@ func (s *Supervisor) finalizeTerminal(cause terminalCause, exit exitInfo) Superv
 	}
 	stopped := s.stoppedAt
 
-	// Plan §5.5 teardown step 5 / Batch 2.3: stop every ProviderProxy
-	// the supervisor started in step 8. The helper emits proxy_stopped
-	// per proxy in reverse order with reason="teardown" on a clean
-	// terminal (StateCompleted) or the failure terminals; the lifecycle
-	// writer is still open at this point so the verbs land before the
-	// final close in Run's deferred drain. Stop errors are recorded in
-	// the verb's "reason" field via stopProviderProxies; they do not
-	// change the terminal state.
-	reasonToken := "teardown"
-	switch final {
-	case StateKilledByUser, StateTimedOut, StateKilledIdle, StateKilledOOM:
-		reasonToken = "shutdown"
-	case StateFailedAgent, StateFailedBackend, StateFailedPolicy, StateFailedScan, StateQuarantined:
-		reasonToken = "shutdown"
-	}
-	s.stopProviderProxies(s.startedProxies, reasonToken)
-	s.startedProxies = nil
+	// Plan §5.5 — canonical 9-step teardown sequence. Step 1 (stop
+	// child) has already happened by the time finalizeTerminal runs;
+	// the helper picks up at step 2 (AcceptingShutdown + drain), then
+	// drops rules (step 3), stops the observer (step 4), stops every
+	// ProviderProxy in reverse order (step 5), stops the MCP gateway
+	// (step 6), restores the workspace MCP configs + asks Backend to
+	// Stop+Destroy (step 7), and stops the ControlSocket (step 8).
+	// Step 9 (writer drain + transcript + leaks aggregator + final
+	// summary) is owned by the rest of finalizeTerminal + Run's
+	// deferred drain.
+	reasonToken := reasonTokenForTerminal(final)
+	s.teardownSequence(context.Background(), reasonToken)
 
 	// Step 10 (collect partial diff): invoke the configured collector
 	// against runDir/git-diff.patch with a context-bound timeout so a
