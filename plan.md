@@ -164,13 +164,13 @@ All five per-subsystem streams stay as **source of truth**. `leaks.jsonl` is the
 
 **Batch 2.1 — `.ai-env/secrets.local.yaml` loader** [x] — as iter-3.
 
-**Batch 2.2 — ProviderProxy: multi-provider, ns-safe, upstream allowlist**
+**Batch 2.2 — ProviderProxy: multi-provider, ns-safe, upstream allowlist** [x]
 - One `ProviderProxy` per provider in active credentials.
 - `BindMode` chain: SetnsTCP → BridgeGateway → UnixSocket. Mode chosen at **step 6** based on `capability.Detect()` + `Backend.GatewayAddress()`.
 - **Upstream Host-header allowlist** in `RoundTrip`: Host must exactly match the provider's canonical host. 403 otherwise. Defeats "open relay" abuse where an agent that finds the proxy 127.0.0.1:<port> dials arbitrary hosts.
 - Acceptance: as iter-3 + `TestProviderProxy_UpstreamHostAllowlist_RejectsOther` + `TestProviderProxy_MultiProvider_TwoListenersDistinctPorts`.
 
-**Batch 2.3 — Supervisor starts ProviderProxy(es)** — per Batch 5.5 step 8.
+**Batch 2.3 — Supervisor starts ProviderProxy(es)** [x] — per Batch 5.5 step 8.
 
 **Batch 2.4 — `BuildProviderProxyFromSecrets`** [x] — as iter-3.
 

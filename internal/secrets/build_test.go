@@ -1,6 +1,7 @@
 package secrets
 
 import (
+	"net"
 	"strings"
 	"testing"
 	"time"
@@ -195,5 +196,77 @@ func TestErrNoProviderCredentialsExported(t *testing.T) {
 	}
 	if !strings.Contains(ErrNoProviderCredentials.Error(), "secrets.local.yaml") {
 		t.Errorf("sentinel message should mention the file, got %q", ErrNoProviderCredentials.Error())
+	}
+}
+
+// TestBuildProviderProxyFromSecrets_ForwardsBindMode_SetnsTCP verifies
+// Plan Batch 2.2's BindMode option is plumbed through the factory.
+// Every constructed proxy reports BindMode() = BindModeSetnsTCP.
+func TestBuildProviderProxyFromSecrets_ForwardsBindMode_SetnsTCP(t *testing.T) {
+	cfg := &LocalConfig{
+		Version: LocalConfigSchemaVersion,
+		Secrets: LocalSecretsSection{
+			Providers: map[string]LocalProviderCredentials{
+				"anthropic": {APIKey: "sk-ant-fwd-aaaaaaaaaaaaaaaaaaaaa"},
+				"openai":    {APIKey: "sk-openai-fwd-bbbbbbbbbbbbbbbbbbb"},
+			},
+		},
+	}
+	enter := func(path string, fn func() (net.Listener, error)) (net.Listener, error) {
+		return fn()
+	}
+	res, err := BuildProviderProxyFromSecrets(cfg, BuildOptions{
+		BindMode:   BindModeSetnsTCP,
+		NetNSPath:  "/proc/12345/ns/net",
+		NetNSEnter: enter,
+	})
+	if err != nil {
+		t.Fatalf("BuildProviderProxyFromSecrets: %v", err)
+	}
+	if len(res.Proxies) != 2 {
+		t.Fatalf("expected 2 proxies, got %d", len(res.Proxies))
+	}
+	for _, p := range res.Proxies {
+		if p.BindMode() != BindModeSetnsTCP {
+			t.Errorf("proxy %q BindMode = %q, want %q", p.Provider(), p.BindMode(), BindModeSetnsTCP)
+		}
+	}
+}
+
+// TestBuildProviderProxyFromSecrets_UnixSocketUsesPathFunc verifies
+// the BuildOptions.UnixSocketPathFunc callback is invoked once per
+// provider so each proxy binds a distinct socket path.
+func TestBuildProviderProxyFromSecrets_UnixSocketUsesPathFunc(t *testing.T) {
+	cfg := &LocalConfig{
+		Version: LocalConfigSchemaVersion,
+		Secrets: LocalSecretsSection{
+			Providers: map[string]LocalProviderCredentials{
+				"anthropic": {APIKey: "sk-ant-unix-aaaaaaaaaaaaaaaaaaa"},
+				"openai":    {APIKey: "sk-openai-unix-bbbbbbbbbbbbbbbbb"},
+			},
+		},
+	}
+	var calls []string
+	pathFunc := func(provider string) string {
+		calls = append(calls, provider)
+		return "/tmp/ppx-" + provider + ".sock"
+	}
+	res, err := BuildProviderProxyFromSecrets(cfg, BuildOptions{
+		BindMode:           BindModeUnixSocket,
+		UnixSocketPathFunc: pathFunc,
+	})
+	if err != nil {
+		t.Fatalf("BuildProviderProxyFromSecrets: %v", err)
+	}
+	if len(res.Proxies) != 2 {
+		t.Fatalf("expected 2 proxies, got %d", len(res.Proxies))
+	}
+	if len(calls) != 2 {
+		t.Errorf("UnixSocketPathFunc called %d times, want 2", len(calls))
+	}
+	for _, p := range res.Proxies {
+		if p.BindMode() != BindModeUnixSocket {
+			t.Errorf("proxy %q BindMode = %q, want %q", p.Provider(), p.BindMode(), BindModeUnixSocket)
+		}
 	}
 }

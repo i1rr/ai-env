@@ -36,6 +36,7 @@ package secrets
 import (
 	"errors"
 	"fmt"
+	"net"
 	"sort"
 	"strings"
 	"time"
@@ -69,6 +70,39 @@ type BuildOptions struct {
 	// ShutdownTimeout caps how long Stop waits for in-flight requests.
 	// Zero falls through to defaultShutdownTimeout in NewProviderProxy.
 	ShutdownTimeout time.Duration
+
+	// BindMode names the reachability mode every constructed proxy
+	// binds in. Zero value falls through to BindModeLoopback in
+	// NewProviderProxy so existing callers (the legacy supervisor /
+	// batch 2.4 tests) keep their loopback behavior.
+	//
+	// Plan Batch 2.2 / 2.3: the supervisor picks the mode at canonical
+	// pre-launch step 6 via capability.PickProviderProxyMode and
+	// passes it through here. Every proxy the factory produces uses
+	// the same mode (one provider = one listener; all listeners share
+	// the same reachability surface).
+	BindMode BindMode
+
+	// NetNSPath is forwarded to every proxy when BindMode is
+	// BindModeSetnsTCP. The supervisor obtains the path from the
+	// backend (typically `/proc/<pid>/ns/net` for the sandbox PID
+	// after Backend.Start). Ignored for non-SetnsTCP modes.
+	NetNSPath string
+
+	// NetNSEnter is the netns-entry wrapper the supervisor injects
+	// when BindMode is BindModeSetnsTCP. Production callers wire an
+	// implementation backed by `ns.WithNetNSPath` (Plan §0.5 / tech
+	// stack row). Required for BindModeSetnsTCP; ignored otherwise.
+	NetNSEnter func(path string, fn func() (net.Listener, error)) (net.Listener, error)
+
+	// UnixSocketPathFunc, when non-nil, produces the per-provider Unix
+	// socket path the proxy binds when BindMode is
+	// BindModeUnixSocket. The supervisor wires this so each provider
+	// gets a distinct socket under <runDir>/ipc/. The returned path
+	// must be supervisor-owned; the proxy chowns / chmods it as part
+	// of its bind discipline. Ignored for non-UnixSocket modes;
+	// required for that mode.
+	UnixSocketPathFunc func(provider string) string
 }
 
 // BuildResult bundles the outputs of BuildProviderProxyFromSecrets.
@@ -179,12 +213,20 @@ func BuildProviderProxyFromSecrets(cfg *LocalConfig, opts BuildOptions) (BuildRe
 			})
 			continue
 		}
+		var unixSocketPath string
+		if opts.BindMode == BindModeUnixSocket && opts.UnixSocketPathFunc != nil {
+			unixSocketPath = opts.UnixSocketPathFunc(name)
+		}
 		proxy, err := NewProviderProxy(Options{
 			Provider:        name,
 			Token:           token,
 			ListenAddr:      opts.ListenAddr,
 			Logger:          opts.Logger,
 			ShutdownTimeout: opts.ShutdownTimeout,
+			BindMode:        opts.BindMode,
+			NetNSPath:       opts.NetNSPath,
+			NetNSEnter:      opts.NetNSEnter,
+			UnixSocketPath:  unixSocketPath,
 		})
 		if err != nil {
 			return BuildResult{}, fmt.Errorf("secrets: BuildProviderProxyFromSecrets: provider %q: %w", name, err)

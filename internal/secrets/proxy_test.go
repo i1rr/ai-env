@@ -2,9 +2,12 @@ package secrets
 
 import (
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -468,5 +471,363 @@ func TestRedactSecrets(t *testing.T) {
 				t.Errorf("RedactSecrets(%q) = %q, want %q", tc.in, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestProviderProxy_UpstreamHostAllowlist_RejectsOther verifies Plan
+// Batch 2.2's open-relay defense: a request whose inbound Host header
+// points at an unrelated host (api.openai.com against an anthropic
+// proxy) is rejected with HTTP 403 before the request can be rewritten
+// and dispatched. The configured upstream (api.anthropic.com) and the
+// proxy's own bind address must still be accepted so the legitimate
+// use cases keep working.
+func TestProviderProxy_UpstreamHostAllowlist_RejectsOther(t *testing.T) {
+	const token = "sk-ant-allowlist-test-aaaaaaaaaaaaaaa"
+
+	var upstreamCalls int
+	var upstreamMu sync.Mutex
+	_, upstreamURL := startTestUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+		upstreamMu.Lock()
+		upstreamCalls++
+		upstreamMu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	})
+
+	transport := &rewritingTransport{target: upstreamURL, wrapped: http.DefaultTransport}
+	proxy, err := NewProviderProxy(Options{
+		Provider:  ProviderAnthropic,
+		Token:     token,
+		Transport: transport,
+	})
+	if err != nil {
+		t.Fatalf("NewProviderProxy: %v", err)
+	}
+	if err := proxy.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = proxy.Stop() })
+
+	// 1) A request that fakes a Host pointing at the OTHER provider
+	//    must be rejected with 403; the upstream must not be dialed.
+	req, _ := http.NewRequest("POST", proxy.URL()+"/v1/messages", strings.NewReader(`{}`))
+	req.Host = "api.openai.com"
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("client.Do: %v", err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("non-allowlisted Host: status = %d, want 403", resp.StatusCode)
+	}
+
+	// 2) A request that fakes a Host pointing at an unrelated host
+	//    must also be rejected.
+	req2, _ := http.NewRequest("POST", proxy.URL()+"/v1/messages", strings.NewReader(`{}`))
+	req2.Host = "evil.example.com"
+	resp2, err := http.DefaultClient.Do(req2)
+	if err != nil {
+		t.Fatalf("client.Do evil: %v", err)
+	}
+	_, _ = io.Copy(io.Discard, resp2.Body)
+	_ = resp2.Body.Close()
+	if resp2.StatusCode != http.StatusForbidden {
+		t.Errorf("evil Host: status = %d, want 403", resp2.StatusCode)
+	}
+
+	upstreamMu.Lock()
+	if upstreamCalls != 0 {
+		t.Errorf("upstream dialed %d times; allowlist must reject before dispatch", upstreamCalls)
+	}
+	upstreamMu.Unlock()
+
+	// 3) Legitimate request (loopback Host) succeeds.
+	req3, _ := http.NewRequest("GET", proxy.URL()+"/v1/models", nil)
+	resp3, err := http.DefaultClient.Do(req3)
+	if err != nil {
+		t.Fatalf("client.Do loopback: %v", err)
+	}
+	_, _ = io.Copy(io.Discard, resp3.Body)
+	_ = resp3.Body.Close()
+	if resp3.StatusCode != http.StatusOK {
+		t.Errorf("loopback Host: status = %d, want 200", resp3.StatusCode)
+	}
+
+	// 4) Legitimate request (canonical upstream Host) succeeds.
+	req4, _ := http.NewRequest("GET", proxy.URL()+"/v1/models", nil)
+	req4.Host = "api.anthropic.com"
+	resp4, err := http.DefaultClient.Do(req4)
+	if err != nil {
+		t.Fatalf("client.Do canonical: %v", err)
+	}
+	_, _ = io.Copy(io.Discard, resp4.Body)
+	_ = resp4.Body.Close()
+	if resp4.StatusCode != http.StatusOK {
+		t.Errorf("canonical Host: status = %d, want 200", resp4.StatusCode)
+	}
+}
+
+// TestProviderProxy_MultiProvider_TwoListenersDistinctPorts verifies
+// Plan Batch 2.2's "One listener per provider" rule: two ProviderProxy
+// instances (anthropic + openai) bind distinct ports on loopback and
+// each pins its own upstream allowlist. The two listeners must not
+// share a port, and a request crafted for one provider's bind must not
+// land on the other's.
+func TestProviderProxy_MultiProvider_TwoListenersDistinctPorts(t *testing.T) {
+	const antTok = "sk-ant-multi-aaaaaaaaaaaaaaaaaaaaaaa"
+	const oaTok = "sk-openai-multi-bbbbbbbbbbbbbbbbbbbbbb"
+
+	var antHits, oaHits int
+	var mu sync.Mutex
+	_, antUpstream := startTestUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		antHits++
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	})
+	_, oaUpstream := startTestUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		oaHits++
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	})
+
+	antProxy, err := NewProviderProxy(Options{
+		Provider:  ProviderAnthropic,
+		Token:     antTok,
+		Transport: &rewritingTransport{target: antUpstream, wrapped: http.DefaultTransport},
+	})
+	if err != nil {
+		t.Fatalf("anthropic NewProviderProxy: %v", err)
+	}
+	if err := antProxy.Start(); err != nil {
+		t.Fatalf("anthropic Start: %v", err)
+	}
+	t.Cleanup(func() { _ = antProxy.Stop() })
+
+	oaProxy, err := NewProviderProxy(Options{
+		Provider:  ProviderOpenAI,
+		Token:     oaTok,
+		Transport: &rewritingTransport{target: oaUpstream, wrapped: http.DefaultTransport},
+	})
+	if err != nil {
+		t.Fatalf("openai NewProviderProxy: %v", err)
+	}
+	if err := oaProxy.Start(); err != nil {
+		t.Fatalf("openai Start: %v", err)
+	}
+	t.Cleanup(func() { _ = oaProxy.Stop() })
+
+	if antProxy.URL() == oaProxy.URL() {
+		t.Fatalf("multi-provider proxies share URL %q (must bind distinct ports)", antProxy.URL())
+	}
+	_, antPort, err := net.SplitHostPort(strings.TrimPrefix(antProxy.URL(), "http://"))
+	if err != nil {
+		t.Fatalf("split anthropic URL: %v", err)
+	}
+	_, oaPort, err := net.SplitHostPort(strings.TrimPrefix(oaProxy.URL(), "http://"))
+	if err != nil {
+		t.Fatalf("split openai URL: %v", err)
+	}
+	if antPort == oaPort {
+		t.Errorf("anthropic and openai share port %s", antPort)
+	}
+
+	// Each proxy's upstream pin is independent — a request to the
+	// anthropic proxy lands at the anthropic upstream (and vice
+	// versa).
+	resp, err := http.DefaultClient.Get(antProxy.URL() + "/v1/messages")
+	if err != nil {
+		t.Fatalf("ant client.Do: %v", err)
+	}
+	_ = resp.Body.Close()
+	resp2, err := http.DefaultClient.Get(oaProxy.URL() + "/v1/chat/completions")
+	if err != nil {
+		t.Fatalf("oa client.Do: %v", err)
+	}
+	_ = resp2.Body.Close()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if antHits != 1 {
+		t.Errorf("anthropic upstream hits = %d, want 1", antHits)
+	}
+	if oaHits != 1 {
+		t.Errorf("openai upstream hits = %d, want 1", oaHits)
+	}
+
+	// Each proxy reports its own provider via BindMode/Provider so the
+	// supervisor's proxy_started metadata is unambiguous.
+	if antProxy.Provider() != ProviderAnthropic || oaProxy.Provider() != ProviderOpenAI {
+		t.Errorf("provider tags swapped: ant=%q oa=%q", antProxy.Provider(), oaProxy.Provider())
+	}
+}
+
+// TestProviderProxy_BindModeSetnsTCP_UsesNetNSEnter verifies the
+// SetnsTCP path delegates the bind to the supervisor-supplied
+// NetNSEnter callback. On macOS / non-privileged Linux we cannot
+// actually enter a netns, so the test injects an identity wrapper that
+// runs the bind closure in the current netns. The assertion is that
+// (a) NetNSEnter was called with the configured NetNSPath, and (b) the
+// resulting URL is reachable.
+func TestProviderProxy_BindModeSetnsTCP_UsesNetNSEnter(t *testing.T) {
+	const token = "sk-ant-setns-test-cccccccccccccccccccc"
+
+	var enteredPath string
+	enter := func(path string, fn func() (net.Listener, error)) (net.Listener, error) {
+		enteredPath = path
+		return fn()
+	}
+
+	proxy, err := NewProviderProxy(Options{
+		Provider:   ProviderAnthropic,
+		Token:      token,
+		BindMode:   BindModeSetnsTCP,
+		NetNSPath:  "/proc/12345/ns/net",
+		NetNSEnter: enter,
+	})
+	if err != nil {
+		t.Fatalf("NewProviderProxy: %v", err)
+	}
+	if err := proxy.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = proxy.Stop() })
+
+	if enteredPath != "/proc/12345/ns/net" {
+		t.Errorf("NetNSEnter called with path=%q, want /proc/12345/ns/net", enteredPath)
+	}
+	if proxy.BindMode() != BindModeSetnsTCP {
+		t.Errorf("BindMode() = %q, want %q", proxy.BindMode(), BindModeSetnsTCP)
+	}
+	if !strings.HasPrefix(proxy.URL(), "http://127.0.0.1:") {
+		t.Errorf("URL = %q, want http://127.0.0.1:port prefix", proxy.URL())
+	}
+}
+
+// TestProviderProxy_BindModeSetnsTCP_RequiresNetNSEnter verifies the
+// SetnsTCP mode fails closed when the supervisor did not supply a
+// NetNSEnter wrapper. Without the wrapper the proxy would silently
+// bind in the host netns where the agent cannot reach it; failing at
+// Start is the loud signal the supervisor turns into a fatal error.
+func TestProviderProxy_BindModeSetnsTCP_RequiresNetNSEnter(t *testing.T) {
+	proxy, err := NewProviderProxy(Options{
+		Provider:  ProviderAnthropic,
+		Token:     "sk-ant-test-ddddddddddddddddddddd",
+		BindMode:  BindModeSetnsTCP,
+		NetNSPath: "/proc/12345/ns/net",
+	})
+	if err != nil {
+		t.Fatalf("NewProviderProxy: %v", err)
+	}
+	err = proxy.Start()
+	if err == nil {
+		_ = proxy.Stop()
+		t.Fatal("expected error from Start when NetNSEnter is nil for BindModeSetnsTCP")
+	}
+	if !strings.Contains(err.Error(), "NetNSEnter") {
+		t.Errorf("error = %q, want it to mention NetNSEnter", err.Error())
+	}
+}
+
+// TestProviderProxy_BindModeSetnsTCP_RequiresNetNSPath verifies the
+// SetnsTCP mode rejects an empty NetNSPath at construction time so a
+// misconfigured supervisor fails fast.
+func TestProviderProxy_BindModeSetnsTCP_RequiresNetNSPath(t *testing.T) {
+	_, err := NewProviderProxy(Options{
+		Provider:   ProviderAnthropic,
+		Token:      "sk-ant-test-eeeeeeeeeeeeeeeeeeeee",
+		BindMode:   BindModeSetnsTCP,
+		NetNSEnter: func(path string, fn func() (net.Listener, error)) (net.Listener, error) { return fn() },
+	})
+	if err == nil {
+		t.Fatal("expected error for empty NetNSPath")
+	}
+	if !strings.Contains(err.Error(), "NetNSPath") {
+		t.Errorf("error = %q, want it to mention NetNSPath", err.Error())
+	}
+}
+
+// TestProviderProxy_BindModeBridgeGateway_RequiresListenAddr verifies
+// the BridgeGateway mode rejects a missing ListenAddr (the supervisor
+// MUST plumb the gateway IP from Backend.GatewayAddress()).
+func TestProviderProxy_BindModeBridgeGateway_RequiresListenAddr(t *testing.T) {
+	_, err := NewProviderProxy(Options{
+		Provider: ProviderAnthropic,
+		Token:    "sk-ant-test-fffffffffffffffffffff",
+		BindMode: BindModeBridgeGateway,
+	})
+	if err == nil {
+		t.Fatal("expected error for empty ListenAddr in BindModeBridgeGateway")
+	}
+	if !strings.Contains(err.Error(), "ListenAddr") {
+		t.Errorf("error = %q, want it to mention ListenAddr", err.Error())
+	}
+}
+
+// TestProviderProxy_BindModeUnixSocket_BindsListener verifies the
+// UnixSocket path binds a stream socket at the supplied path and
+// reports the path via ListenAddr(). The plan locks this as the
+// fallback mode when SetnsTCP / BridgeGateway are unavailable.
+func TestProviderProxy_BindModeUnixSocket_BindsListener(t *testing.T) {
+	// macOS / BSD cap Unix socket paths at ~104 bytes (Linux ~108);
+	// t.TempDir() typically nests under /var/folders/... which can
+	// exceed the limit. Use a short /tmp path so the test runs on
+	// every supported host. The cleanup removes the parent.
+	dir, err := os.MkdirTemp("/tmp", "ppx-sock")
+	if err != nil {
+		t.Fatalf("mkdir tmp: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	sockPath := filepath.Join(dir, "a.sock")
+	proxy, err := NewProviderProxy(Options{
+		Provider:       ProviderAnthropic,
+		Token:          "sk-ant-test-ggggggggggggggggggggg",
+		BindMode:       BindModeUnixSocket,
+		UnixSocketPath: sockPath,
+	})
+	if err != nil {
+		t.Fatalf("NewProviderProxy: %v", err)
+	}
+	if err := proxy.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = proxy.Stop() })
+
+	if proxy.BindMode() != BindModeUnixSocket {
+		t.Errorf("BindMode() = %q, want %q", proxy.BindMode(), BindModeUnixSocket)
+	}
+	if proxy.ListenAddr() != sockPath {
+		t.Errorf("ListenAddr() = %q, want %q", proxy.ListenAddr(), sockPath)
+	}
+	if !strings.HasPrefix(proxy.URL(), "http+unix://") {
+		t.Errorf("URL = %q, want http+unix:// prefix", proxy.URL())
+	}
+	// Stat the socket node to confirm the bind landed on disk.
+	if _, err := os.Stat(sockPath); err != nil {
+		t.Errorf("unix socket not on disk: %v", err)
+	}
+	// Stop removes the socket node.
+	if err := proxy.Stop(); err != nil {
+		t.Errorf("Stop: %v", err)
+	}
+	if _, err := os.Stat(sockPath); err == nil {
+		t.Errorf("unix socket still on disk after Stop")
+	}
+}
+
+// TestProviderProxy_BindModeUnknown rejects an unknown BindMode value
+// at construction so a typo in the supervisor-side config fails loud.
+func TestProviderProxy_BindModeUnknown(t *testing.T) {
+	_, err := NewProviderProxy(Options{
+		Provider: ProviderAnthropic,
+		Token:    "sk-ant-test-hhhhhhhhhhhhhhhhhhhhh",
+		BindMode: BindMode("not_a_mode"),
+	})
+	if err == nil {
+		t.Fatal("expected error for unknown BindMode")
+	}
+	if !strings.Contains(err.Error(), "BindMode") {
+		t.Errorf("error = %q, want it to mention BindMode", err.Error())
 	}
 }

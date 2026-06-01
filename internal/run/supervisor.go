@@ -15,6 +15,7 @@ import (
 	"github.com/rivan1986/ai-env/internal/backend"
 	"github.com/rivan1986/ai-env/internal/network"
 	"github.com/rivan1986/ai-env/internal/policy"
+	"github.com/rivan1986/ai-env/internal/secrets"
 )
 
 // defaultStatsPollInterval is how often the supervisor's stats / idle /
@@ -389,6 +390,25 @@ type SupervisorOptions struct {
 	// it. Ignored when ShellShim is false; required otherwise.
 	ShellShimDir string
 
+	// ProviderProxies is the per-run set of ProviderProxy instances the
+	// supervisor starts at canonical pre-launch step 8 (Plan §5.5). The
+	// CLI builds the slice via secrets.BuildProviderProxyFromSecrets
+	// (Batch 2.4) after picking the BindMode at step 6; the supervisor
+	// owns the Start / Stop lifecycle and the proxy_started /
+	// proxy_stopped lifecycle verb emission (Batch 0.1).
+	//
+	// A nil / empty slice skips the wiring entirely so legacy callers
+	// (the plan-03 / plan-04 supervisor tests that do not stand up a
+	// proxy) keep their current behavior. A non-empty slice is
+	// fail-closed: any bind failure aborts the run with
+	// StateFailedBackend / StopReasonBackendFailure, per Bucket 2's
+	// "Hard fail-closed on unreachable" decision.
+	//
+	// The supervisor stops the proxies in reverse order during
+	// finalize (teardown step 5 in Plan §5.5) so the most-recently-
+	// started listener tears down first.
+	ProviderProxies []*secrets.ProviderProxy
+
 	// ShimHelperCmd is the command line the wrapper scripts re-exec via
 	// `exec` inside the sandbox. Defaults to DefaultShimHelperCmd
 	// (`/usr/local/bin/ai-env shim-helper`) when empty: that is the
@@ -579,6 +599,13 @@ type Supervisor struct {
 	// surfaced via the result.
 	startedAt time.Time
 	stoppedAt time.Time
+
+	// startedProxies is the slice of ProviderProxy instances Start
+	// returned successfully. The supervisor stores them between
+	// step 8 (Plan §5.5) and the terminal teardown so finalizeTerminal
+	// can stop them in reverse order with the matching proxy_stopped
+	// lifecycle verbs. Empty / nil when no proxies were configured.
+	startedProxies []*secrets.ProviderProxy
 }
 
 // terminalCause is the internal reason the main loop will pick for the
@@ -1028,6 +1055,25 @@ func (s *Supervisor) Run(ctx context.Context) (SupervisorResult, error) {
 		cause := terminalCause{state: StateFailedPolicy, reason: StopReasonPolicyFailure, note: fmt.Sprintf("apply network policy: %v", err)}
 		return s.finalizeTerminal(cause, exitInfo{}), nil
 	}
+	if s.checkCancel() {
+		return s.finalizeTerminal(s.takeTerminalCause(terminalCause{state: StateKilledByUser, reason: StopReasonSignal}), exitInfo{}), nil
+	}
+	// Plan §5.5 step 8 / Batch 2.3: start each ProviderProxy after the
+	// network policy is installed (so the egress rules already tolerate
+	// the per-proxy carve-outs) and before the agent is launched (so
+	// XXX_BASE_URL points at a live listener). Bind failure is
+	// fail-closed per Bucket 2's "Hard fail-closed on unreachable":
+	// stop the proxies that did start and abort with StateFailedPolicy
+	// (the proxy bind is part of the applying-policy window in the
+	// state machine; the state transition table forbids
+	// applying_policy -> failed_backend, and the plan treats the
+	// per-proxy carve-outs as a policy install component).
+	started, err := s.startProviderProxies()
+	if err != nil {
+		cause := terminalCause{state: StateFailedPolicy, reason: StopReasonPolicyFailure, note: fmt.Sprintf("start provider proxy: %v", err)}
+		return s.finalizeTerminal(cause, exitInfo{}), nil
+	}
+	s.startedProxies = started
 	if s.checkCancel() {
 		return s.finalizeTerminal(s.takeTerminalCause(terminalCause{state: StateKilledByUser, reason: StopReasonSignal}), exitInfo{}), nil
 	}
@@ -1755,6 +1801,24 @@ func (s *Supervisor) finalizeTerminal(cause terminalCause, exit exitInfo) Superv
 		codePtr = &code
 	}
 	stopped := s.stoppedAt
+
+	// Plan §5.5 teardown step 5 / Batch 2.3: stop every ProviderProxy
+	// the supervisor started in step 8. The helper emits proxy_stopped
+	// per proxy in reverse order with reason="teardown" on a clean
+	// terminal (StateCompleted) or the failure terminals; the lifecycle
+	// writer is still open at this point so the verbs land before the
+	// final close in Run's deferred drain. Stop errors are recorded in
+	// the verb's "reason" field via stopProviderProxies; they do not
+	// change the terminal state.
+	reasonToken := "teardown"
+	switch final {
+	case StateKilledByUser, StateTimedOut, StateKilledIdle, StateKilledOOM:
+		reasonToken = "shutdown"
+	case StateFailedAgent, StateFailedBackend, StateFailedPolicy, StateFailedScan, StateQuarantined:
+		reasonToken = "shutdown"
+	}
+	s.stopProviderProxies(s.startedProxies, reasonToken)
+	s.startedProxies = nil
 
 	// Step 10 (collect partial diff): invoke the configured collector
 	// against runDir/git-diff.patch with a context-bound timeout so a

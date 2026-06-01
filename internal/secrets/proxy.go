@@ -45,6 +45,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"os"
 	"regexp"
 	"strings"
 	"sync"
@@ -107,6 +108,51 @@ var providerHosts = map[string]string{
 	ProviderOpenAI:    "api.openai.com",
 }
 
+// BindMode names the reachability mode the ProviderProxy listener
+// binds in. The values mirror `capability.ProviderProxyMode` (kept as a
+// dedicated type here so the secrets package does not import the
+// capability package and lift it into every consumer's dependency
+// graph). The supervisor's canonical pre-launch step 6 picks one of
+// these per run; the proxy honors the choice via Options.BindMode.
+//
+// Plan Batch 2.2 pins the chain: SetnsTCP → BridgeGateway → UnixSocket.
+type BindMode string
+
+const (
+	// BindModeSetnsTCP binds the listener inside a target network
+	// namespace (the sandbox netns). The supervisor wraps Start in
+	// `ns.WithNetNSPath(NetNSPath, ...)` so the bound TCP listener is
+	// reachable to the agent inside the sandbox without an external
+	// route. Linux-only.
+	BindModeSetnsTCP BindMode = "setns_tcp"
+
+	// BindModeBridgeGateway binds the listener on a host-side bridge
+	// gateway IP that the sandbox can dial. ListenAddr carries the
+	// host:port the proxy must bind (typically the gateway IP the
+	// backend reports via `Backend.GatewayAddress()`). The supervisor
+	// narrows NetworkPolicy.ProxyCarveOuts to include the address so
+	// the sandbox's egress rules tolerate the traffic.
+	BindModeBridgeGateway BindMode = "bridge_gateway"
+
+	// BindModeUnixSocket binds the listener on a per-run Unix socket
+	// at UnixSocketPath. The agent CLI's HTTP client must honor
+	// `http+unix://` for this mode to be reachable; the supervisor
+	// only picks it when the feature probe succeeds.
+	BindModeUnixSocket BindMode = "unix_socket"
+
+	// BindModeLoopback is the legacy default for tests and call sites
+	// that do not yet wire a per-run reachability mode. The listener
+	// binds on the host's loopback interface with no namespace
+	// wrapping. Mirrors the v0 behavior so the existing proxy_test.go
+	// surface keeps passing.
+	BindModeLoopback BindMode = "loopback"
+)
+
+// String returns the canonical token for the mode. Mirrors the values
+// `capability.ProviderProxyMode` stringifies to so a verb's metadata
+// reads the same regardless of which package authored the field.
+func (b BindMode) String() string { return string(b) }
+
 // ProviderUpstream returns the canonical upstream host for the named
 // provider. The boolean is false for an unknown provider; callers
 // surface that as an error rather than silently allowing a request to
@@ -167,6 +213,57 @@ type Options struct {
 	// defaultShutdownTimeout (2s) when zero. A negative value is
 	// rejected at construction.
 	ShutdownTimeout time.Duration
+
+	// BindMode names the reachability mode the listener binds in. One
+	// of the BindMode constants. Defaults to BindModeLoopback so the
+	// pre-Batch-2.2 surface (proxy_test.go) keeps working unchanged.
+	//
+	// Plan Batch 2.2: the supervisor picks the mode at canonical
+	// pre-launch step 6 (see capability.PickProviderProxyMode) and
+	// passes it through here. SetnsTCP requires NetNSPath; UnixSocket
+	// requires UnixSocketPath; BridgeGateway and Loopback use
+	// ListenAddr (which is validated as a loopback or bridge-gateway
+	// address depending on the mode).
+	BindMode BindMode
+
+	// NetNSPath is the absolute path of the target network namespace
+	// the SetnsTCP listener binds in. Required when BindMode is
+	// BindModeSetnsTCP; ignored otherwise. The supervisor obtains the
+	// path from the backend (e.g. `/proc/<pid>/ns/net`) before calling
+	// Start; the proxy itself does not interpret the path.
+	NetNSPath string
+
+	// NetNSEnter, when non-nil, wraps the listener-bind operation in
+	// the caller's netns-entry function. The supervisor injects an
+	// implementation backed by `ns.WithNetNSPath` (Plan §0.5 / tech
+	// stack row) so the TCP listener is bound inside the sandbox netns
+	// without the Go scheduler migrating the bind goroutine off the
+	// locked OS thread. Tests pass a no-op (the func runs fn directly)
+	// so the SetnsTCP path is exercisable on macOS / non-privileged
+	// hosts where setns is unavailable.
+	//
+	// Contract:
+	//   - fn is the listener-bind closure; it returns the bound
+	//     net.Listener and an error.
+	//   - NetNSEnter MUST invoke fn exactly once; the wrapper returns
+	//     fn's outputs verbatim (the proxy expects the bound listener
+	//     to be reachable from outside the netns once fn returns,
+	//     which is the documented invariant for TCP listeners bound
+	//     inside a netns).
+	//
+	// When BindMode is not BindModeSetnsTCP the field is ignored. When
+	// it is BindModeSetnsTCP and NetNSEnter is nil the proxy reports
+	// an error from Start so a misconfigured supervisor fails loud at
+	// bind time rather than silently leaving the listener in the host
+	// netns.
+	NetNSEnter func(path string, fn func() (net.Listener, error)) (net.Listener, error)
+
+	// UnixSocketPath is the absolute path of the Unix socket the proxy
+	// binds when BindMode is BindModeUnixSocket. Required for that
+	// mode; ignored otherwise. The supervisor chowns the socket to the
+	// sandbox UID (via the runDir/ipc mount layer) after Start
+	// returns; the proxy itself does not chmod or chown.
+	UnixSocketPath string
 }
 
 // ProviderProxy is the per-run HTTP reverse proxy. Construct it with
@@ -202,6 +299,23 @@ type ProviderProxy struct {
 	// listenAddr is the address Start was asked to bind. Stored so
 	// Start's validation can report it verbatim in error messages.
 	listenAddr string
+
+	// bindMode names the reachability mode the listener uses. Plan
+	// Batch 2.2 picks the mode at supervisor step 6; the proxy honors
+	// the choice via the Options.BindMode field.
+	bindMode BindMode
+
+	// netNSPath is the absolute path of the target netns the
+	// SetnsTCP listener binds in. Empty for other bind modes.
+	netNSPath string
+
+	// netNSEnter wraps the listener bind in the supervisor-supplied
+	// netns-entry function. Nil for non-SetnsTCP modes.
+	netNSEnter func(path string, fn func() (net.Listener, error)) (net.Listener, error)
+
+	// unixSocketPath is the absolute path of the Unix socket the
+	// UnixSocket mode binds. Empty for other bind modes.
+	unixSocketPath string
 
 	// startOnce / stopOnce make Start single-shot and Stop idempotent
 	// across multiple callers (the supervisor's normal terminal path
@@ -252,12 +366,53 @@ func NewProviderProxy(opts Options) (*ProviderProxy, error) {
 			opts.ShutdownTimeout)
 	}
 
-	addr := strings.TrimSpace(opts.ListenAddr)
-	if addr == "" {
-		addr = defaultLoopbackAddr
+	bindMode := opts.BindMode
+	if bindMode == "" {
+		bindMode = BindModeLoopback
 	}
-	if err := validateLoopbackAddr(addr); err != nil {
-		return nil, err
+
+	addr := strings.TrimSpace(opts.ListenAddr)
+	netNSPath := strings.TrimSpace(opts.NetNSPath)
+	unixSocketPath := strings.TrimSpace(opts.UnixSocketPath)
+
+	switch bindMode {
+	case BindModeLoopback, BindModeSetnsTCP:
+		// SetnsTCP also binds a TCP listener; the wrapper enters the
+		// target netns before the bind so the address pins loopback
+		// inside that netns (Plan Batch 2.2: "ns.WithNetNSPath at the
+		// call site"). The validator therefore enforces the same
+		// loopback rule for both modes — the listener is reachable
+		// only inside the chosen netns regardless of mode.
+		if addr == "" {
+			addr = defaultLoopbackAddr
+		}
+		if err := validateLoopbackAddr(addr); err != nil {
+			return nil, err
+		}
+		if bindMode == BindModeSetnsTCP {
+			if netNSPath == "" {
+				return nil, errors.New("secrets: ProviderProxy: BindModeSetnsTCP requires NetNSPath")
+			}
+		}
+	case BindModeBridgeGateway:
+		// BridgeGateway binds on a non-loopback host-side IP the
+		// backend reports. Empty address is rejected because the
+		// supervisor MUST plumb the gateway IP — defaulting to
+		// loopback here would silently make the listener unreachable
+		// from inside the sandbox.
+		if addr == "" {
+			return nil, errors.New("secrets: ProviderProxy: BindModeBridgeGateway requires ListenAddr")
+		}
+		if _, _, err := net.SplitHostPort(addr); err != nil {
+			return nil, fmt.Errorf("secrets: ProviderProxy: invalid ListenAddr %q for BindModeBridgeGateway: %w", addr, err)
+		}
+	case BindModeUnixSocket:
+		if unixSocketPath == "" {
+			return nil, errors.New("secrets: ProviderProxy: BindModeUnixSocket requires UnixSocketPath")
+		}
+		// ListenAddr ignored in this mode; do not validate.
+	default:
+		return nil, fmt.Errorf("secrets: ProviderProxy: unknown BindMode %q", string(bindMode))
 	}
 
 	transport := opts.Transport
@@ -278,6 +433,10 @@ func NewProviderProxy(opts Options) (*ProviderProxy, error) {
 		transport:       transport,
 		shutdownTimeout: shutdown,
 		listenAddr:      addr,
+		bindMode:        bindMode,
+		netNSPath:       netNSPath,
+		netNSEnter:      opts.NetNSEnter,
+		unixSocketPath:  unixSocketPath,
 		done:            make(chan struct{}),
 	}, nil
 }
@@ -292,9 +451,9 @@ func NewProviderProxy(opts Options) (*ProviderProxy, error) {
 func (p *ProviderProxy) Start() error {
 	var startErr error
 	p.startOnce.Do(func() {
-		ln, err := net.Listen("tcp", p.listenAddr)
+		ln, urlStr, err := p.bindListener()
 		if err != nil {
-			startErr = fmt.Errorf("secrets: ProviderProxy listen %s: %w", p.listenAddr, err)
+			startErr = err
 			close(p.done)
 			return
 		}
@@ -310,11 +469,11 @@ func (p *ProviderProxy) Start() error {
 		p.mu.Lock()
 		p.listener = ln
 		p.server = srv
-		p.url = "http://" + ln.Addr().String()
+		p.url = urlStr
 		p.mu.Unlock()
 
-		p.logf("provider_proxy: started provider=%s url=%s upstream=%s",
-			p.provider, p.url, p.upstreamHost)
+		p.logf("provider_proxy: started provider=%s url=%s upstream=%s mode=%s",
+			p.provider, p.url, p.upstreamHost, p.bindMode)
 
 		go func() {
 			defer close(p.done)
@@ -336,6 +495,60 @@ func (p *ProviderProxy) Start() error {
 		return errors.New("secrets: ProviderProxy.Start already called")
 	}
 	return nil
+}
+
+// bindListener performs the per-BindMode listener bind. Returns the
+// bound listener and the URL the supervisor should expose to the
+// agent. Errors are wrapped with the bind mode so a supervisor that
+// surfaces them through lifecycle.jsonl can attribute the failure to
+// the right step.
+//
+// SetnsTCP wraps the bind in NetNSEnter so the TCP listener pins to
+// loopback inside the target netns. BridgeGateway and Loopback bind
+// directly in the host netns. UnixSocket binds a stream socket at
+// UnixSocketPath.
+func (p *ProviderProxy) bindListener() (net.Listener, string, error) {
+	switch p.bindMode {
+	case BindModeUnixSocket:
+		// Remove any stale socket from a previous run so re-binding
+		// the same path does not fail with EADDRINUSE. The plan's
+		// per-run lifecycle pins the path inside <runDir>/ipc; an
+		// orphan there can only come from a crashed predecessor.
+		_ = os.Remove(p.unixSocketPath)
+		ln, err := net.Listen("unix", p.unixSocketPath)
+		if err != nil {
+			return nil, "", fmt.Errorf("secrets: ProviderProxy listen unix %s: %w", p.unixSocketPath, err)
+		}
+		return ln, "http+unix://" + p.unixSocketPath, nil
+
+	case BindModeSetnsTCP:
+		if p.netNSEnter == nil {
+			return nil, "", fmt.Errorf("secrets: ProviderProxy: BindModeSetnsTCP requires NetNSEnter (path=%s)", p.netNSPath)
+		}
+		bind := func() (net.Listener, error) {
+			return net.Listen("tcp", p.listenAddr)
+		}
+		ln, err := p.netNSEnter(p.netNSPath, bind)
+		if err != nil {
+			return nil, "", fmt.Errorf("secrets: ProviderProxy listen tcp (setns netns=%s addr=%s): %w",
+				p.netNSPath, p.listenAddr, err)
+		}
+		if ln == nil {
+			return nil, "", fmt.Errorf("secrets: ProviderProxy: NetNSEnter returned nil listener (netns=%s)", p.netNSPath)
+		}
+		return ln, "http://" + ln.Addr().String(), nil
+
+	case BindModeBridgeGateway, BindModeLoopback:
+		ln, err := net.Listen("tcp", p.listenAddr)
+		if err != nil {
+			return nil, "", fmt.Errorf("secrets: ProviderProxy listen tcp %s (mode=%s): %w",
+				p.listenAddr, p.bindMode, err)
+		}
+		return ln, "http://" + ln.Addr().String(), nil
+
+	default:
+		return nil, "", fmt.Errorf("secrets: ProviderProxy: unknown BindMode %q", string(p.bindMode))
+	}
 }
 
 // Stop shuts the proxy down. It first asks the http.Server to
@@ -384,6 +597,15 @@ func (p *ProviderProxy) Stop() error {
 		// proxy on the same pinned port does not hit "address in use".
 		<-p.done
 
+		// Unix-socket bind: remove the socket node from disk so a
+		// subsequent run does not collide on the same path. The path
+		// is supervisor-owned (inside <runDir>/ipc) so the cleanup is
+		// safe even when the run is torn down out from under the
+		// proxy.
+		if p.bindMode == BindModeUnixSocket && p.unixSocketPath != "" {
+			_ = os.Remove(p.unixSocketPath)
+		}
+
 		p.logf("provider_proxy: stopped provider=%s", p.provider)
 	})
 	return stopErr
@@ -416,13 +638,45 @@ func (p *ProviderProxy) UpstreamHost() string {
 	return p.upstreamHost
 }
 
+// BindMode reports the reachability mode the listener bound in. The
+// supervisor (Plan §5.5 step 8) records this in the
+// proxy_started lifecycle verb's Metadata under the
+// "reachability" key.
+func (p *ProviderProxy) BindMode() BindMode {
+	return p.bindMode
+}
+
+// ListenAddr returns the host:port the proxy bound (for TCP modes) or
+// the unix-socket path (for BindModeUnixSocket). The supervisor uses
+// this to populate the proxy_started verb's "listen_addr" metadata
+// field. Returns the empty string before Start succeeds.
+func (p *ProviderProxy) ListenAddr() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.listener == nil {
+		return ""
+	}
+	if p.bindMode == BindModeUnixSocket {
+		return p.unixSocketPath
+	}
+	return p.listener.Addr().String()
+}
+
 // newReverseProxy builds the httputil.ReverseProxy that handles every
 // inbound request. The Director rewrites the request to target the
 // configured upstream host + scheme, strips inbound auth headers, and
 // installs the host-side credential. The ErrorHandler emits a redacted
 // log line and returns a small JSON-shaped error so the agent sees a
 // well-formed response on upstream failure.
-func (p *ProviderProxy) newReverseProxy() *httputil.ReverseProxy {
+//
+// The returned http.Handler wraps the reverse proxy in an
+// upstream-Host allowlist check so a request whose inbound Host /
+// target URL points at a different provider's API (or any other host)
+// is rejected with 403 before the request can be rewritten and
+// dispatched. This is the "Defeats open relay" rule from Plan
+// Batch 2.2: the proxy fronts exactly one provider; a Host header that
+// points elsewhere is a misuse signal, not a silent-rewrite request.
+func (p *ProviderProxy) newReverseProxy() http.Handler {
 	rp := &httputil.ReverseProxy{
 		Director:  p.director,
 		Transport: p.transport,
@@ -433,7 +687,93 @@ func (p *ProviderProxy) newReverseProxy() *httputil.ReverseProxy {
 		},
 		ModifyResponse: p.modifyResponse,
 	}
-	return rp
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !p.inboundHostAllowed(r) {
+			p.logf("provider_proxy: forbidden host=%s path=%s upstream=%s",
+				RedactSecrets(r.Host), RedactSecrets(r.URL.Path), p.upstreamHost)
+			http.Error(w, "forbidden upstream host", http.StatusForbidden)
+			return
+		}
+		rp.ServeHTTP(w, r)
+	})
+}
+
+// inboundHostAllowed enforces the upstream-Host allowlist on the
+// inbound request. A request is allowed when its Host header / URL.Host
+// is one of:
+//
+//   - the proxy's own bind address (the typical case: agent dials
+//     127.0.0.1:<port> with the loopback URL the supervisor injected
+//     via ANTHROPIC_BASE_URL / OPENAI_BASE_URL);
+//   - the configured upstream canonical host (api.anthropic.com /
+//     api.openai.com — the case where the agent constructs a full URL
+//     pointing at the provider's documented endpoint);
+//   - an empty Host (HTTP/1.0 client without Host header — accepted
+//     because the director rewrites the host to the canonical upstream
+//     anyway, so the request is fully attributable on the host side).
+//
+// Any other Host is rejected with 403 in newReverseProxy. The check
+// runs BEFORE the director so a forbidden Host never reaches the
+// upstream-rewrite step where it would be silently masked.
+func (p *ProviderProxy) inboundHostAllowed(r *http.Request) bool {
+	host := strings.TrimSpace(r.Host)
+	if host == "" && r.URL != nil {
+		host = strings.TrimSpace(r.URL.Host)
+	}
+	if host == "" {
+		return true
+	}
+	if strings.EqualFold(host, p.upstreamHost) {
+		return true
+	}
+	// Loopback / bind-address pass: split off the port and check the
+	// host portion against the configured listen address. For
+	// SetnsTCP / Loopback the proxy binds 127.0.0.1:<port>; the agent
+	// dials that exact address. For BridgeGateway the gateway IP is
+	// the bound host. For UnixSocket the inbound Host is the
+	// socket-path-derived sentinel HTTP clients use; we tolerate any
+	// host in that mode (the socket itself is the auth surface).
+	if p.bindMode == BindModeUnixSocket {
+		return true
+	}
+	hostOnly, _, splitErr := net.SplitHostPort(host)
+	if splitErr != nil {
+		hostOnly = host
+	}
+	// Compare against the bound listener's address when available so
+	// a SetnsTCP-mode proxy that the OS bound to an ephemeral port is
+	// recognized verbatim.
+	p.mu.Lock()
+	bound := p.listener
+	p.mu.Unlock()
+	if bound != nil {
+		boundHost, _, lerr := net.SplitHostPort(bound.Addr().String())
+		if lerr == nil && strings.EqualFold(hostOnly, boundHost) {
+			return true
+		}
+	}
+	// Generic loopback acceptance (covers tests that dial via
+	// proxy.URL() before the listener address is interrogated, and
+	// covers IPv6 loopback notation).
+	if isLoopbackHost(hostOnly) {
+		return true
+	}
+	return false
+}
+
+// isLoopbackHost reports whether the given hostname / IP literal is
+// the loopback interface. Mirrors the validateLoopbackAddr accept
+// list so the allowlist and the bind-time validator agree on what
+// "loopback" means.
+func isLoopbackHost(host string) bool {
+	switch host {
+	case "127.0.0.1", "localhost", "::1":
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		return true
+	}
+	return false
 }
 
 // director rewrites the inbound request to target the configured
