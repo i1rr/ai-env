@@ -178,7 +178,7 @@ All five per-subsystem streams stay as **source of truth**. `leaks.jsonl` is the
 
 **Batch 3.1 — `BuildRunGateway`** [x] — as iter-3.
 
-**Batch 3.2 — Per-run MCP config + per-server tokens + workspace shadowing**
+**Batch 3.2 — Per-run MCP config + per-server tokens + workspace shadowing** [x]
 - Write `<runDir>/mcp-servers.json` shape:
   ```json
   { "mcpServers": { "<name>": { "command": "ai-env", "args": ["shim-helper", "mcp", "<name>"],
