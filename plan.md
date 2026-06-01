@@ -264,7 +264,7 @@ Acceptance:
 
 **Batch 5.6 — `network_policy_degraded`** [x] — as iter-3.
 
-### Section 6 — Bucket 6: filesystem events writer — as iter-3.
+### Section 6 — Bucket 6: filesystem events writer [x] — as iter-3.
 
 ### Section 7 — Bucket 8: transcript writer + correlation — as iter-3.
 
