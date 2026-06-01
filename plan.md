@@ -262,7 +262,7 @@ Acceptance:
 - `TestSupervisor_SchemaVersionsWrittenAtStep1`.
 - `TestSupervisor_WorkspaceConfigRestoredAtTeardown`.
 
-**Batch 5.6 — `network_policy_degraded`** — as iter-3.
+**Batch 5.6 — `network_policy_degraded`** [x] — as iter-3.
 
 ### Section 6 — Bucket 6: filesystem events writer — as iter-3.
 

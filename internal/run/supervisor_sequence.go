@@ -11,38 +11,38 @@
 //
 // Pre-launch (11 steps):
 //
-//	 1. Open lifecycle writer; chmod runDir 0700; write schema_versions
-//	    map to run.json now (NOT at finalize).
-//	 2. Mint primary control_token + per-server server_tokens; write
-//	    `<runDir>/ipc/.helper-token`; start ControlSocket.
-//	 3. backend.Create with the full BindMounts list (runDir/ipc,
-//	    shimDir, ai-env binary, HOME shadow, canonical-path shim
-//	    overlays); workspace MCP-config files renamed to
-//	    `*.ai-env-shadowed`.
-//	 4. (no supervisor action — observer covered by step 5.)
-//	 5. backend.Start — netns assigned; start EgressObserver via
-//	    `ns.WithNetNSPath` (netns now exists).
-//	 6. Choose ProviderProxy reachability + compute narrowed
-//	    NetworkPolicy + applyNetworkPolicy.
-//	 7. Install AIENV-EGR-<8hex> rules at OUTPUT pos 1 via ns.Do.
-//	 8. Allocate per-provider proxy ports; start each ProviderProxy.
-//	 9. Build MCP Gateway + write `<runDir>/mcp-servers.json` and
-//	    `<runDir>/ipc/mcp-servers.real.json`; emit `gateway_started`.
-//	10. Install host-side shim wrappers in `<shimDir>/<program>`.
-//	11. backend.Exec(child cmd).
+//  1. Open lifecycle writer; chmod runDir 0700; write schema_versions
+//     map to run.json now (NOT at finalize).
+//  2. Mint primary control_token + per-server server_tokens; write
+//     `<runDir>/ipc/.helper-token`; start ControlSocket.
+//  3. backend.Create with the full BindMounts list (runDir/ipc,
+//     shimDir, ai-env binary, HOME shadow, canonical-path shim
+//     overlays); workspace MCP-config files renamed to
+//     `*.ai-env-shadowed`.
+//  4. (no supervisor action — observer covered by step 5.)
+//  5. backend.Start — netns assigned; start EgressObserver via
+//     `ns.WithNetNSPath` (netns now exists).
+//  6. Choose ProviderProxy reachability + compute narrowed
+//     NetworkPolicy + applyNetworkPolicy.
+//  7. Install AIENV-EGR-<8hex> rules at OUTPUT pos 1 via ns.Do.
+//  8. Allocate per-provider proxy ports; start each ProviderProxy.
+//  9. Build MCP Gateway + write `<runDir>/mcp-servers.json` and
+//     `<runDir>/ipc/mcp-servers.real.json`; emit `gateway_started`.
+//  10. Install host-side shim wrappers in `<shimDir>/<program>`.
+//  11. backend.Exec(child cmd).
 //
 // Teardown (9 steps reverse):
 //
-//	1. Stop child.
-//	2. ControlSocket.AcceptingShutdown; drain ≤2s.
-//	3. Drop iptables/pf rules via ns.Do.
-//	4. Stop EgressObserver.
-//	5. Stop each ProviderProxy.
-//	6. Stop MCP Gateway logger; emit `gateway_stopped`.
-//	7. Restore workspace MCP-config files; backend.Stop + Destroy.
-//	8. Stop ControlSocket; emit `control_socket_stopped`.
-//	9. Drain + close writers; render transcript.md; leaks aggregate;
-//	   final summary. (Owned by finalizeTerminal + Run's deferred drain.)
+//  1. Stop child.
+//  2. ControlSocket.AcceptingShutdown; drain ≤2s.
+//  3. Drop iptables/pf rules via ns.Do.
+//  4. Stop EgressObserver.
+//  5. Stop each ProviderProxy.
+//  6. Stop MCP Gateway logger; emit `gateway_stopped`.
+//  7. Restore workspace MCP-config files; backend.Stop + Destroy.
+//  8. Stop ControlSocket; emit `control_socket_stopped`.
+//  9. Drain + close writers; render transcript.md; leaks aggregate;
+//     final summary. (Owned by finalizeTerminal + Run's deferred drain.)
 //
 // Fail-closed: at each step a failure stops every already-started
 // component in reverse, emits the matching `_stopped` verbs with
@@ -212,6 +212,16 @@ func (s *Supervisor) runBackendStart() error {
 // A non-nil Observer in opts that fails to Start aborts the run with
 // StateFailedBackend (the observer is part of the backend.Start step
 // boundary).
+//
+// Plan §10 row 10 / Batch 5.6: when the observer Start fails in auto
+// mode the supervisor ALSO emits `network_policy_degraded` so the
+// audit trail carries a single "the network policy itself is now
+// degraded" signal alongside the more specific `observer_unavailable`
+// verb. The two verbs are complementary: `observer_unavailable` names
+// the component, `network_policy_degraded` names the policy-level
+// consequence ("network controls in this run are weaker than the
+// configured policy intended"). Disabled mode is silent on both — the
+// operator opted out of observation explicitly.
 func (s *Supervisor) startEgressObserver(ctx context.Context) error {
 	obs := s.opts.EgressObserver
 	if obs == nil {
@@ -236,6 +246,17 @@ func (s *Supervisor) startEgressObserver(ctx context.Context) error {
 				"reason": "start_failed",
 				"detail": err.Error(),
 			})
+			// Plan Batch 5.6: auto-mode observer degradation is also
+			// a network-policy degradation (the egress evidence stream
+			// the policy relies on is missing). Disabled mode skips
+			// this — the operator opted out of observation entirely,
+			// so calling the policy "degraded" would be misleading.
+			if s.opts.EgressObserverMode != egress.EgressObserverModeDisabled {
+				_ = s.lcWri.WriteVerb(
+					LifecycleVerbNetworkPolicyDegraded,
+					NetworkPolicyDegradedMetadata("observer_unavailable", "observer", err.Error()),
+				)
+			}
 		}
 		return nil
 	}
@@ -288,7 +309,21 @@ func (s *Supervisor) installEgressRules(ctx context.Context) error {
 		// The supervisor records the skip via the network-events log
 		// rather than aborting the run, which mirrors the
 		// observer's auto-mode degradation.
+		//
+		// Plan §10 row 10 / Batch 5.6: the unsupported-OS skip is a
+		// network-policy degradation — the run continues without the
+		// canonical AIENV-EGR-<8hex> chain. We emit
+		// `network_policy_degraded` so the audit trail carries the
+		// signal alongside the lifecycle.jsonl evidence the supervisor
+		// already records via the rules lifecycle's OnUninstalled
+		// callback (when wired).
 		if errors.Is(err, rules.ErrUnsupportedOS) {
+			if s.lcWri != nil {
+				_ = s.lcWri.WriteVerb(
+					LifecycleVerbNetworkPolicyDegraded,
+					NetworkPolicyDegradedMetadata("rules_unsupported_os", "egress_rules", err.Error()),
+				)
+			}
 			return nil
 		}
 		return fmt.Errorf("install egress rules: %w", err)
