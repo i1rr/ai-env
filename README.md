@@ -120,7 +120,7 @@ The MVP enforces, at minimum:
 - **MCP gateway.** Model Context Protocol servers run behind a host-side gateway (`internal/mcp/`) with a deny-by-default registry (`.ai-env/mcp.yaml`), source / digest pinning, schema-hash pinning, workspace-only filesystem scope and current-repo-only GitHub scope enforcers, and a per-run `mcp-calls.jsonl` audit trail. `ai-env mcp list / add / pin / scan / remove` is the operator surface; the agent never talks to an MCP server directly. See `docs/mcp-security.md`.
 - **Auditable run trail.** Every run produces `network-events.jsonl`, `policy-decisions.jsonl`, `mcp-calls.jsonl`, captured stdout/stderr, a partial diff, and a `final-summary.md`. `ai-env report` and `ai-env logs` surface them.
 
-Detailed treatments live under `docs/` (`threat-model.md`, `enforcement-boundaries.md`, `residual-risk.md`, `model-credentials.md`, `backends.md`, `unsafe-modes.md`, `mcp-security.md`). Read those before relying on `ai-env` for anything you would not run yourself in a coffee shop.
+Detailed treatments live under `docs/` (`threat-model.md`, `enforcement-boundaries.md`, `residual-risk.md`, `model-credentials.md`, `backends.md`, `unsafe-modes.md`, `mcp-security.md`, `secrets-local-yaml.md`, `platform-parity.md`, `operator-runbook.md`, `leaks-jsonl-schema.md`, `transcript-jsonl-schema.md`, `filesystem-events-jsonl-schema.md`). Read those before relying on `ai-env` for anything you would not run yourself in a coffee shop.
 
 ## Status
 
@@ -274,6 +274,17 @@ Prints a one-shot report for an env's latest run (or for a specific historical r
 
 `report` is a one-shot read (no tail), reads `run.json` via atomic snapshot so a live supervisor never produces a torn record, and exits 0 with a friendly "no runs recorded" message for an env that has never been run. Malformed lines in `network-events.jsonl` produce a stderr warning but do not block the rest of the report.
 
+### `ai-env leaks <env-name> [--run <id>] [--format table|json] [--vector <1-8>] [--source <stream>]`
+
+Renders the unified `leaks.jsonl` view for an env's run. The view is the merged projection of every per-subsystem evidence stream (lifecycle, policy-decisions, mcp-calls, network-events, shell-commands, filesystem-events, transcript, secret-scan) the supervisor materialized atomically at finalize time. The on-disk schema is documented in [`docs/leaks-jsonl-schema.md`](docs/leaks-jsonl-schema.md); the per-stream schemas live in [`docs/transcript-jsonl-schema.md`](docs/transcript-jsonl-schema.md) and [`docs/filesystem-events-jsonl-schema.md`](docs/filesystem-events-jsonl-schema.md).
+
+- `--run <id>`: pick a specific historical run. Defaults to the env's latest.
+- `--format table|json`: human-readable table (default) or pass-through JSONL for downstream pipelines.
+- `--vector <1-8>`: filter to a single leak-coverage audit vector (path escape, GitHub repo escape, network egress, ProviderProxy abuse, broker token leak, MCP scope escape, shell-shim bypass, transcript correlation). Zero (the default) prints every row.
+- `--source <stream>`: filter to a single source stream value (e.g. `policy-decisions`, `mcp-calls`, `secret-scan`). Empty (the default) prints every row.
+
+Staging files matching `leaks.jsonl.tmp.*` are skipped at read time so an in-flight rebuild or aborted run does not surface a partial line.
+
 ### `ai-env agents list`
 
 Loads the project's `.ai-env/agents.yaml`, unions its keys with the launchers registered in code, and prints a four-column table: `NAME`, `BINARY`, `VERSION`, `STATUS`. Every probe runs with a short host-side timeout (10 seconds) so a wedged agent CLI cannot stall the table. Status values are descriptive strings (`ok`, `binary not found`, `version unsupported (<constraint>)`, `probe failed`, `no launcher registered`, `no contract in agents.yaml`, `unknown agent`) rather than booleans, so the operator can spot the precise mismatch at a glance. `list` never trial-runs autonomous flags; it only invokes the version subcommand.
@@ -301,8 +312,9 @@ When the supervisor (`internal/run`) drives a run, it materializes everything un
   stderr.log           # disk-streamed agent stderr (not memory-buffered)
   agent-command.txt    # placeholder for the launched agent command
   transcript.md        # placeholder for the rendered transcript
+  transcript.jsonl     # structured per-CLI transcript (plan 10; see docs/transcript-jsonl-schema.md)
   shell-commands.jsonl # populated by the optional shell shim when `--shell-shim` is wired (plan 08)
-  filesystem-events.jsonl
+  filesystem-events.jsonl # MCP + shim filesystem decisions (plan 10; see docs/filesystem-events-jsonl-schema.md)
   network-events.jsonl # one JSON object per network decision (plan 05)
   policy-decisions.jsonl # one JSON object per export-gate verdict and broker stage (plan 07)
   mcp-calls.jsonl      # one JSON object per MCP gateway AuthorizeLaunch / AuthorizeCall verdict (plan 09)
@@ -311,8 +323,11 @@ When the supervisor (`internal/run`) drives a run, it materializes everything un
   dependency-report.json # discovered vulnerability scanners + their results (plan 06)
   security-report.md
   final-summary.md     # written on terminal by the supervisor (plan 05)
+  leaks.jsonl          # derived unified leak-coverage view, atomic-replaced (plan 10; see docs/leaks-jsonl-schema.md)
   scan-results/        # scanner output subdirectory
 ```
+
+The run directory itself is `chmod 0700` so other accounts on the host cannot read the sensitive evidence. `leaks.jsonl` is the only file written via the atomic "write tmp, fsync, rename" pattern at finalize time; every other JSONL is append-only with fsync-per-record. Staging files matching `leaks.jsonl.tmp.*` are skipped by every reader (including `ai-env leaks`) so an aborted rebuild does not surface a partial line.
 
 All files are created up front as empty placeholders so later append-writers do not have to do their own first-write-creates dance. `run.json` is the canonical record schema; it is written via temp-file + `rename` + parent-dir `fsync`, so a crashed write never surfaces partial JSON.
 

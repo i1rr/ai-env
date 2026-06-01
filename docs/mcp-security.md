@@ -477,6 +477,60 @@ A record with an empty `decision` is rejected by the writer; the
 writer fsyncs after every record so a crash after a verdict has been
 returned to the caller does not lose the audit entry.
 
+### Audit cross-references
+
+The MCP gateway's evidence joins three other audit streams the
+supervisor writes:
+
+- `lifecycle.jsonl`: the gateway emits `gateway_started`,
+  `gateway_stopped`, `gateway_secret_blocked`, and
+  `gateway_secret_response` verbs. The per-verb metadata schemas are
+  documented in [`leaks-jsonl-schema.md`](leaks-jsonl-schema.md).
+  Workspace-config neutralization at `backend.Create` emits
+  `mcp_config_neutralized` (one verb per renamed file).
+- `filesystem-events.jsonl`: filesystem-scope decisions (allow / warn
+  / block) emit a `FilesystemEventRecord` with `source: "mcp-gateway"`
+  alongside the `mcp-calls.jsonl` entry. Schema in
+  [`filesystem-events-jsonl-schema.md`](filesystem-events-jsonl-schema.md).
+- `leaks.jsonl`: the derived unified view joins `mcp-calls.jsonl`
+  records (via `LeakSourceMCPCalls`) and the gateway's lifecycle
+  verbs (via `LeakSourceLifecycle`) into one chronologically-ordered
+  evidence file. Schema in
+  [`leaks-jsonl-schema.md`](leaks-jsonl-schema.md).
+
+## Per-run gateway wiring
+
+The gateway is wired per-run by the supervisor, not at workspace init.
+Three artifacts cooperate:
+
+- `<runDir>/mcp-servers.json`: the per-run config the agent CLI
+  reads. Each server entry points at `ai-env shim-helper mcp <name>`
+  with two env vars: `AI_ENV_CONTROL_SOCKET` (the in-sandbox path of
+  the host control socket) and `AI_ENV_MCP_SERVER_TOKEN` (a per-server
+  short-lived secret). The primary control token is NOT in this file;
+  the supervisor delivers it to helper processes via a side-band
+  mechanism the agent UID cannot read.
+- `<runDir>/ipc/mcp-servers.real.json`: the real-server commands the
+  helper invokes after the gateway authorizes a call. Mode 0600,
+  owned by the container UID, not bind-mounted into the agent's view.
+- Workspace-local MCP configs (`.mcp.json`,
+  `.claude/settings.json#mcpServers`) are renamed to
+  `*.ai-env-shadowed` at `backend.Create` to prevent the agent CLI
+  from auto-merging them with the supervisor-managed config. The
+  rename is recorded as `mcp_config_neutralized` and restored at
+  `backend.Destroy`.
+
+`AuthorizeMCPCall` requires both the primary control token and the
+per-server token. An agent that reads `mcp-servers.json` sees the
+per-server token but cannot use it without the primary control token,
+which it never has access to.
+
+The GitHub broker credentials and provider keys the MCP gateway might
+in principle have access to live in
+[`secrets-local-yaml.md`](secrets-local-yaml.md). The MCP gateway
+does not read that file; the registry pin is independent of the
+credential plumbing.
+
 ## CLI surface
 
 `internal/cli/mcp.go` implements the operator-facing subcommands.

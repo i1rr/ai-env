@@ -288,13 +288,13 @@ Acceptance:
 
 ### Section 10 — Documentation + operator tooling + CI
 
-**Batch 10.1 — Schema docs** — `docs/leaks-jsonl-schema.md`, `docs/transcript-jsonl-schema.md`, `docs/filesystem-events-jsonl-schema.md`. Each enumerates `_schema_version` + every lifecycle verb from Batch 0.1 with its Metadata table (mirror inline; new verbs `shim_coverage_degraded`, `helper_rpc_aborted`, `transcript_parser_error`, `gateway_secret_response`, `mcp_config_neutralized` documented by name).
+**Batch 10.1 — Schema docs** [x] — `docs/leaks-jsonl-schema.md`, `docs/transcript-jsonl-schema.md`, `docs/filesystem-events-jsonl-schema.md`. Each enumerates `_schema_version` + every lifecycle verb from Batch 0.1 with its Metadata table (mirror inline; new verbs `shim_coverage_degraded`, `helper_rpc_aborted`, `transcript_parser_error`, `gateway_secret_response`, `mcp_config_neutralized` documented by name).
 
-**Batch 10.2 — Platform-parity matrix** — as iter-3.
+**Batch 10.2 — Platform-parity matrix** [x] — as iter-3.
 
-**Batch 10.3 — Operator runbook + CHANGELOG** — as iter-3.
+**Batch 10.3 — Operator runbook + CHANGELOG** [x] — as iter-3.
 
-**Batch 10.4 — Operator surface docs** — README + `docs/mcp-security.md` update + `docs/secrets-local-yaml.md`.
+**Batch 10.4 — Operator surface docs** [x] — README + `docs/mcp-security.md` update + `docs/secrets-local-yaml.md`.
 
 **Batch 10.5 — `ai-env doctor`** — remediation table covers EVERY lifecycle verb + capability detection result + new verbs from iter-3/iter-4 (`shim_coverage_degraded`, `helper_rpc_aborted`, `transcript_parser_error`, `gateway_secret_response`, `mcp_config_neutralized`, `origin_drift`).
 
