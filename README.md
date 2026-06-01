@@ -7,7 +7,7 @@
 Build the binary, scaffold an environment for the current project, look at what was generated, and export the agent's changes back to your tree.
 
 ```sh
-# 1. Build (Go 1.22+ required)
+# 1. Build (Go 1.25+ required; see go.mod)
 go install github.com/rivan1986/ai-env/cmd/ai-env@latest
 
 # 2. From inside your project repo, create an environment named "demo"
@@ -51,7 +51,7 @@ go build -o ai-env ./cmd/ai-env
 ./ai-env --help
 ```
 
-Go 1.22 or newer is required (see `go.mod`). The binary is self-contained: there is no daemon and no system state outside the per-project `.ai-env/` directory.
+Go 1.25 or newer is required (see `go.mod`). The binary is self-contained: there is no daemon and no system state outside the per-project `.ai-env/` directory.
 
 ### Optional host tooling
 
@@ -66,29 +66,43 @@ Most flows work with the Go binary alone. A few features become available when t
 A first end-to-end run looks like this. The example uses `claude` as the agent; `codex` works the same way.
 
 ```sh
-# In your project root
-ai-env new demo                       # scaffold .ai-env/ + workspace for "demo"
+# 0. Verify the host has what ai-env needs (docker/podman, git, optional scanners).
+#    Doctor exits non-zero only when a true blocker is missing (e.g. no container
+#    runtime); capability gaps that the supervisor degrades around report as WARN.
+ai-env doctor
+
+# 1. In your project root, scaffold an environment.
+ai-env new demo
 ai-env policy init                    # write a conservative default policy.yaml (if missing)
 ai-env agents doctor                  # confirm the agent CLI is installed and credentialed
 
-# Once `ai-env run` is wired (later plan), the supervised run will look like:
-ai-env run demo --agent claude --task "fix the failing tests"
+# 2. Run the agent against the workspace.
+#    The supervised launch goes through the agent CLI; ai-env wires the
+#    supervisor, control socket, provider proxy, MCP gateway, shim, and
+#    egress observer around it. (Today this is driven via the agent CLI
+#    directly inside the workspace; a top-level `ai-env run` wrapper lands
+#    in a later plan.)
+cd .ai-env/workspaces/demo
+claude --print "fix the failing tests"
+cd -
 
-# Review the result
+# 3. Review the result.
 ai-env status demo                    # current/last run state
 ai-env logs   demo                    # captured stdout/stderr for the latest run
 ai-env diff   demo                    # baseline -> workspace diff
 ai-env report demo                    # human-readable run report (incl. network summary)
+ai-env leaks  demo                    # unified leaks.jsonl view across every run stream
 
-# Export
+# 4. Export.
 ai-env scan  demo                     # run secret + dependency scanners on the workspace
 ai-env patch demo --out demo.patch    # export the diff as a unified-diff patch (export-gated)
 ai-env pr    demo --draft             # open a brokered draft PR (export-gated, no raw token in sandbox)
+
+# 5. Reclaim disk + branch when done.
+ai-env destroy demo
 ```
 
 Each command operates on the env's latest run by default. Pass `--run <id>` to pin one of the historical runs under `.ai-env/workspaces/demo/.runs/`.
-
-Note: the user-facing `ai-env run` subcommand wires the supervisor, backend, network adapter, provider proxy, and scan hook together end-to-end. The supervisor, backends, network policy adapters, scanners, export gate, and GitHub broker that command composes are already in tree (see the "Run lifecycle", "Backend abstraction", "Network policy enforcement", "Scanning", "Export gate", and "GitHub broker" sections below); the `run` Cobra wiring lands in a later plan. `ai-env destroy` is wired today (see "Commands" below) and reclaims an env's workspace, baseline, and per-env worktree branch.
 
 ## Supported agents
 
@@ -145,7 +159,7 @@ go build -o ai-env ./cmd/ai-env
 ./ai-env --help
 ```
 
-Requires Go 1.22 or newer (see `go.mod`).
+Requires Go 1.25 or newer (see `go.mod`).
 
 ## Commands
 
@@ -783,6 +797,112 @@ ai-env/
   archive/                    # Archived plans (informational)
 ```
 
+## Manual smoke test
+
+Use this checklist to validate a fresh build before cutting a release or wiring it into a downstream project. Every step is reproducible without a live agent CLI, container runtime, or GitHub credentials; the gated steps note their prerequisites explicitly.
+
+### 1. Build and inspect the help surface
+
+```sh
+go build -o /tmp/ai-env ./cmd/ai-env
+/tmp/ai-env --help
+```
+
+Every supported subcommand should appear in `Available Commands`, including the recent additions `doctor` and `leaks`.
+
+### 2. Run the host diagnostic
+
+```sh
+/tmp/ai-env doctor
+/tmp/ai-env doctor --json | jq .
+echo "exit=$?"
+```
+
+The table form prints platform, capability, dependency, and remediation sections. Exit code is non-zero only when neither `docker` nor `podman` is reachable; capability gaps the supervisor degrades around print as `WARN`. The JSON form carries `_schema_version: 1` and stable field names so a CI job can pin one row without breaking on layout changes.
+
+### 3. Run the Go test suite
+
+```sh
+go test ./...
+go test -race ./internal/run/... ./internal/secrets/... ./internal/cli/...
+```
+
+Both should be green. The race-instrumented run targets the concurrency-heavy packages (supervisor, streams, control socket, provider proxy, gateway authorizer); the broader `go test -race ./...` is what the CI workflow runs.
+
+### 4. Run the red-team acceptance suite
+
+```sh
+AI_ENV_ACCEPTANCE=1 go test -tags=acceptance -count=1 -timeout=20m \
+  -run TestLeak_ ./tests/acceptance/...
+```
+
+This exercises five end-to-end adversarial scenarios with real components (real `ControlSocket`, real `ProviderProxy`, real `ai-env shim-helper` subprocess, real `githubbroker` pinning): origin drift between setup and PR, cross-server MCP forge, provider-proxy open-relay attempts, shim `argv[0]` spoofing, and streaming MCP secret scrubbing. The suite skips cleanly when `AI_ENV_ACCEPTANCE=1` is unset.
+
+### 5. Walk the env lifecycle in a scratch project
+
+```sh
+mkdir -p /tmp/aies-smoke && cd /tmp/aies-smoke
+git init -q && git commit --allow-empty -m "init" -q
+
+/tmp/ai-env new demo                  # scaffolds .ai-env/ + workspace
+/tmp/ai-env list                      # demo listed with strategy + last-run
+/tmp/ai-env status demo               # no runs yet, friendly empty state
+/tmp/ai-env agents doctor             # claude/codex CLIs probed if installed
+/tmp/ai-env destroy demo              # workspace + branch reclaimed
+```
+
+### 6. Validate the leaks aggregator against a synthetic run
+
+The leaks pipeline runs at finalize time inside a supervised run. To exercise the CLI surface without launching a full agent run, drop a hand-crafted record into a run dir and read it back:
+
+```sh
+cd /tmp/aies-smoke
+/tmp/ai-env new demo --force
+mkdir -p .ai-env/runs/2026-06-01T00-00-00-fakerun
+cat > .ai-env/runs/2026-06-01T00-00-00-fakerun/leaks.jsonl <<'JSON'
+{"_schema_version":1,"run_id":"2026-06-01T00-00-00-fakerun","vector":1,"source_stream":"lifecycle","source_line":12,"timestamp":"2026-06-01T00:00:01Z","reason":"gateway_secret_blocked","evidence":{"pattern":"anthropic_api_key","finding_id":"abc123","snippet":"[REDACTED pattern=anthropic_api_key len=51]"}}
+{"_schema_version":1,"run_id":"2026-06-01T00-00-00-fakerun","vector":3,"source_stream":"mcp-calls","source_line":4,"timestamp":"2026-06-01T00:00:05Z","reason":"cross_server_forge_blocked","policy_event_id":"pol-42"}
+{"_schema_version":1,"run_id":"2026-06-01T00-00-00-fakerun","vector":7,"source_stream":"shell-commands","source_line":2,"timestamp":"2026-06-01T00:00:08Z","reason":"interpreter_inline_source","evidence":{"pattern":"shell-tokenizer"}}
+JSON
+
+/tmp/ai-env leaks demo --run 2026-06-01T00-00-00-fakerun
+/tmp/ai-env leaks demo --run 2026-06-01T00-00-00-fakerun --vector 3
+/tmp/ai-env leaks demo --run 2026-06-01T00-00-00-fakerun --format json | jq .
+/tmp/ai-env destroy demo
+```
+
+The synthetic input verifies the table render, the `--vector` and `--source` filters, the JSONL pass-through, and the per-record `_schema_version` round-trip. A real run materialises the same `leaks.jsonl` automatically from each subsystem stream.
+
+### 7. Cross-OS verification
+
+```sh
+GOOS=linux  GOARCH=amd64 go build ./... && echo linux/amd64 OK
+GOOS=linux  GOARCH=arm64 go build ./... && echo linux/arm64 OK
+GOOS=darwin GOARCH=amd64 go build ./... && echo darwin/amd64 OK
+GOOS=darwin GOARCH=arm64 go build ./... && echo darwin/arm64 OK
+GOOS=linux  GOARCH=amd64 go vet   ./... && echo linux-vet OK
+```
+
+The Linux paths (`internal/egress/nflog`, `internal/egress/rules`, `cmd/ai-env/shim_helper_exec_linux*.go`) cross-compile cleanly from a Darwin host because the syscall numbers are pinned per architecture in dedicated `_linux_<arch>.go` files; the Darwin paths (`internal/egress/pflog`, `cmd/ai-env/shim_helper_exec_other.go`) compile on both arches without changes.
+
+### 8. Confirm the CI workflows on GitHub
+
+```sh
+gh run list --limit 5
+```
+
+The push that lands the build should produce five workflow runs, each `success`:
+
+| Workflow | Job set |
+| --- | --- |
+| `CI` | `Test (ubuntu-latest)`, `Test (macos-latest)`, `Lint (staticcheck)`, `Security (govulncheck)` |
+| `Race detector` | `Race detector (selected packages)` (runs `go test -race -count=3 -timeout=20m` against the concurrency-heavy subset) |
+| `Acceptance` | `Acceptance suite (linux, -tags=acceptance)` |
+| `Integration` | `Backend integration (AI_ENV_BACKEND_INTEGRATION=1)` |
+| `Release (dry run)` | Four `Build <os>/<arch>` jobs for the supported targets |
+
+The acceptance suite, the race-detector subset, and the integration job are dedicated workflows; everything else lives under `CI`.
+
 ## Development
 
 ```sh
@@ -816,11 +936,37 @@ Prerequisites the gate assumes when on:
 - `internal/backend/docker_sbx`: a working `sbx` CLI on `PATH`, plus whatever daemon (Docker, sandbox runtime) it needs to bring environments up. The lifecycle test exercises `Detect`, `Create`, `Start`, `Exec`, `Stop`, and `Destroy` against a real environment.
 - `internal/agents/claude` and `internal/agents/codex`: the corresponding agent CLI on `PATH`. The probes invoke only the version subcommand and `--help`; they never trial-run autonomous flags.
 
+### Race detector
+
+The CI `Race detector` workflow runs `go test -race -count=3 -timeout=20m` against the concurrency-heavy packages (`internal/run`, `internal/policy`, `internal/secrets`, `internal/network`, `internal/scanners`, `internal/backend/mock`). To run the same command locally:
+
+```sh
+go test -race -count=3 -timeout=20m \
+  ./internal/run/... \
+  ./internal/policy/... \
+  ./internal/secrets/... \
+  ./internal/network/... \
+  ./internal/scanners/... \
+  ./internal/backend/mock/...
+```
+
+### Acceptance tests
+
+The red-team acceptance suite under `tests/acceptance/` exercises the supervisor's security boundaries end-to-end with real components (no mocks at the security boundary). It is gated behind both the `acceptance` build tag and the `AI_ENV_ACCEPTANCE=1` environment marker so a stray `go test ./...` does not spawn subprocesses on a developer machine:
+
+```sh
+AI_ENV_ACCEPTANCE=1 go test -tags=acceptance -count=1 -timeout=20m \
+  ./tests/acceptance/...
+```
+
+The five scenarios that ship today are `TestLeak_OriginDriftBetweenSetupAndPR_Blocked`, `TestLeak_AgentForgesMCPCallAcrossServers_Blocked`, `TestLeak_ProviderProxyOpenRelay_Refused`, `TestLeak_Shim_Argv0Spoof_Rejected`, and `TestLeak_Shim_SecretInStreamingMCPResponse_Scrubbed`. The same workflow runs on the GitHub Actions `Acceptance` workflow under `ubuntu-latest`.
+
 ### Environment variables
 
 | Variable | Default | Purpose |
 | -------- | ------- | ------- |
 | `AI_ENV_BACKEND_INTEGRATION` | unset | When set to `1`, enables the gated backend and agent integration tests. Unset is the default and keeps `go test ./...` hermetic. |
+| `AI_ENV_ACCEPTANCE` | unset | When set to `1`, enables the `tests/acceptance/...` red-team suite. Required in addition to `-tags=acceptance`. Unset is the default so a stray `go test ./...` does not spin up the gated subprocess flow. |
 
 ## License
 
