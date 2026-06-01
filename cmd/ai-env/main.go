@@ -48,9 +48,63 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(newDestroyCmd())
 	root.AddCommand(newMCPCmd())
 	root.AddCommand(newLeaksCmd())
+	root.AddCommand(newDoctorCmd())
 	root.AddCommand(newShimHelperCmd())
 
 	return root
+}
+
+// newDoctorCmd builds the `ai-env doctor` subcommand (plan Batch
+// 10.5). Doctor is the host-side diagnostic the operator runs before
+// kicking off a sandboxed agent: it walks the capability snapshot from
+// internal/capability, probes the optional dependencies (docker /
+// podman / git / scanners), and prints a remediation table mapping
+// every lifecycle verb the supervisor can emit to its actionable
+// follow-up. The default output is a tab-aligned human-readable
+// table; --json switches to a machine-readable projection that a CI
+// job can pin a field on.
+//
+// Exit code policy mirrors `ai-env agents doctor`: non-zero only when
+// at least one check is FAIL (currently the only FAIL surface is
+// "neither docker nor podman is on PATH"). Capability surfaces that
+// the supervisor degrades around (missing CAP_NET_ADMIN, missing
+// /dev/fd, slirp4netns) report WARN — they are advisory, not
+// blockers.
+func newDoctorCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "doctor",
+		Short: "Diagnose the host's ai-env runtime surface and print a remediation table",
+		Long: "Diagnose the host's ai-env runtime surface. Walks the " +
+			"capability snapshot (CAP_NET_ADMIN, CAP_SYS_ADMIN, NFLOG / " +
+			"pflog, slirp4netns, bridge gateway, /dev/fd, userns-remap), " +
+			"probes the optional container runtimes (docker / podman), " +
+			"git, and the optional security scanners (gitleaks, " +
+			"osv-scanner, trivy, semgrep). Each check renders PASS / WARN " +
+			"/ FAIL; the command exits non-zero only when a missing " +
+			"dependency would block the supervisor from launching at " +
+			"all. After the checks, a remediation table maps every " +
+			"lifecycle verb the supervisor can emit (proxy_started, " +
+			"gateway_secret_blocked, observer_unavailable, origin_drift, " +
+			"shim_coverage_degraded, helper_rpc_aborted, " +
+			"transcript_parser_error, mcp_config_neutralized, ...) to " +
+			"the docs page or config knob the operator should consult. " +
+			"--json emits the same content as a machine-readable JSON " +
+			"document for CI consumption.",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			jsonOut, err := cmd.Flags().GetBool("json")
+			if err != nil {
+				return fmt.Errorf("ai-env doctor: read --json: %w", err)
+			}
+			return cli.RunDoctor(cli.DoctorOptions{
+				JSON:   jsonOut,
+				Stdout: cmd.OutOrStdout(),
+				Stderr: cmd.ErrOrStderr(),
+			})
+		},
+	}
+	cmd.Flags().Bool("json", false, "Emit the report as machine-readable JSON instead of the default table")
+	return cmd
 }
 
 // newMCPCmd builds the `ai-env mcp` parent command and attaches its
