@@ -335,6 +335,19 @@ type ControlSocket struct {
 	// deadlock on the wg.Wait below (the watcher would never return).
 	stopCh chan struct{}
 
+	// stopOnce serializes Stop so concurrent or repeated calls do not
+	// race on the listener-Close + listener=nil write pair. The
+	// acceptLoop and ctx-watcher goroutines hold their own copies of
+	// the listener pointer; Stop is the only writer of s.listener and
+	// running it through the Once eliminates any read/write race on
+	// the field itself.
+	stopOnce sync.Once
+
+	// stopErr captures the error from the single Stop invocation that
+	// runs inside stopOnce.Do. Later Stop callers read it and return
+	// the same value so the error contract stays stable.
+	stopErr error
+
 	// shutdownGate is the post-AcceptingShutdown gate. Once flipped
 	// to 1, every NEW RPC returns decision="block",
 	// reason="shutdown" before the per-method handler runs. Atomic
@@ -563,7 +576,7 @@ func (s *ControlSocket) Start(ctx context.Context) error {
 	}()
 
 	s.wg.Add(1)
-	go s.acceptLoop()
+	go s.acceptLoop(ln)
 
 	return nil
 }
@@ -592,6 +605,19 @@ func (s *ControlSocket) AcceptingShutdown() {
 // Stopping without an earlier AcceptingShutdown is supported (test
 // fixtures use it) and just collapses to "close immediately".
 func (s *ControlSocket) Stop() error {
+	s.stopOnce.Do(func() {
+		s.stopErr = s.stopLocked()
+	})
+	return s.stopErr
+}
+
+// stopLocked performs the actual shutdown sequence. It runs exactly
+// once under stopOnce so the listener read, the listener Close, and
+// the listener=nil write are all serialized against any other Stop
+// caller. acceptLoop never reads s.listener after this fix (it owns
+// the listener via parameter), so the only remaining concern is
+// Stop racing with itself, which the Once eliminates.
+func (s *ControlSocket) stopLocked() error {
 	if s.listener == nil {
 		// Either Start was never called or Stop was already called.
 		// In either case we attempt to remove the socket file (in
@@ -601,9 +627,9 @@ func (s *ControlSocket) Stop() error {
 	}
 
 	// Signal the ctx-watcher goroutine to exit if it has not
-	// already. We guard against double-close because Stop may be
-	// called twice (second time is a no-op): use a select on send-
-	// like semantics by checking listener was non-nil above.
+	// already. We guard against double-close because the watcher
+	// itself may have observed ctx.Done() first and closed the
+	// listener already.
 	select {
 	case <-s.stopCh:
 		// Already closed by a previous Stop or a concurrent path;
@@ -635,10 +661,18 @@ func (s *ControlSocket) Stop() error {
 // acceptLoop is the per-listener accept goroutine. Every accepted
 // connection is handed off to a per-conn goroutine; the loop exits
 // when the listener is closed (ErrClosed).
-func (s *ControlSocket) acceptLoop() {
+//
+// The listener is passed as a parameter rather than read from
+// s.listener so the loop holds its own stable pointer for its
+// lifetime. Stop writes nil into s.listener during teardown; reading
+// s.listener concurrently would be a data race (and, on a closed
+// listener, could observe nil between the close and wg.Wait, leading
+// to a nil-pointer panic). Capturing the pointer here makes the
+// loop's view of the listener independent of any Stop sequencing.
+func (s *ControlSocket) acceptLoop(ln *net.UnixListener) {
 	defer s.wg.Done()
 	for {
-		conn, err := s.listener.AcceptUnix()
+		conn, err := ln.AcceptUnix()
 		if err != nil {
 			if errors.Is(err, net.ErrClosed) {
 				return
