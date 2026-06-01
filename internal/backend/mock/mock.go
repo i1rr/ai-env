@@ -56,6 +56,39 @@ type Backend struct {
 	// when its underlying stats endpoint is missing.
 	stats backend.ResourceStats
 
+	// gatewayIP is the value Backend.GatewayAddress returns. Empty
+	// is the default (the mock has no bridge gateway concept); tests
+	// override via SetGatewayAddress to drive the supervisor's
+	// BridgeGateway ProviderProxy path.
+	gatewayIP string
+
+	// gatewayErr is the error Backend.GatewayAddress returns. nil is
+	// the default; tests override via SetGatewayAddress to drive the
+	// "gateway lookup failed" branch.
+	gatewayErr error
+
+	// mappedUIDs maps envID to the host-side UID Backend.MappedUID
+	// returns for that env. Entries default to the in-sandbox UID
+	// (EnvSpec.UID dereferenced, 0 when nil); tests override via
+	// SetMappedUID to drive userns-remap paths.
+	mappedUIDs map[string]int
+
+	// mappedUIDErr is the error Backend.MappedUID returns. nil is
+	// the default; tests override via SetMappedUIDError to drive
+	// the "remap probe failed" branch.
+	mappedUIDErr error
+
+	// probeImageResult is the value Backend.ProbeImage returns.
+	// Empty is the default (the mock cannot inspect image layers);
+	// tests override via SetProbeImage to drive HomeTarget
+	// resolution paths.
+	probeImageResult string
+
+	// probeImageErr is the error Backend.ProbeImage returns. nil is
+	// the default; tests override via SetProbeImage to drive the
+	// probe-failure branch.
+	probeImageErr error
+
 	// nextEnvID generates synthetic env IDs as "env-1", "env-2", ...
 	// so each Create produces a distinct ID even when the caller passes
 	// the same EnvSpec.Name.
@@ -109,8 +142,50 @@ func New(now func() time.Time) *Backend {
 		},
 		execResult: backend.ExecResult{ExitCode: 0, HasExitCode: true},
 		stats:      backend.ResourceStats{Available: false},
+		mappedUIDs: map[string]int{},
 		now:        now,
 	}
+}
+
+// SetGatewayAddress overrides the (ip, err) tuple Backend.GatewayAddress
+// returns for every env. Tests use it to drive the supervisor's
+// ProviderProxy reachability picker through the BridgeGateway branch.
+func (b *Backend) SetGatewayAddress(ip string, err error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.gatewayIP = ip
+	b.gatewayErr = err
+}
+
+// SetMappedUID overrides the host-side UID Backend.MappedUID returns
+// for envID. Tests use it to simulate userns-remap setups where the
+// host-mapped UID differs from EnvSpec.UID.
+func (b *Backend) SetMappedUID(envID string, hostUID int) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.mappedUIDs == nil {
+		b.mappedUIDs = map[string]int{}
+	}
+	b.mappedUIDs[envID] = hostUID
+}
+
+// SetMappedUIDError overrides the error Backend.MappedUID returns
+// for every env. Tests use it to drive the supervisor's "remap
+// probe failed" refuse-to-start branch.
+func (b *Backend) SetMappedUIDError(err error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.mappedUIDErr = err
+}
+
+// SetProbeImage overrides the (homeTarget, err) tuple
+// Backend.ProbeImage returns. Tests use it to drive the supervisor's
+// HomeTarget resolution before Create.
+func (b *Backend) SetProbeImage(homeTarget string, err error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.probeImageResult = homeTarget
+	b.probeImageErr = err
 }
 
 // SetStatus overrides the BackendStatus returned by Detect.
@@ -293,7 +368,63 @@ func (b *Backend) Destroy(envID string) error {
 		return fmt.Errorf("mock backend: unknown envID %q", envID)
 	}
 	delete(b.envs, envID)
+	delete(b.mappedUIDs, envID)
 	return nil
+}
+
+// GatewayAddress implements backend.Backend. The mock returns the
+// (ip, err) tuple SetGatewayAddress configured, or ("", nil) when the
+// test left the defaults alone (mirroring the behavior of backends
+// that have no bridge gateway concept). An unknown envID returns an
+// error even when gatewayErr is nil so the supervisor's
+// "env not created" path is exercised.
+func (b *Backend) GatewayAddress(envID string) (string, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.calls = append(b.calls, Call{Method: "GatewayAddress", EnvID: envID})
+	if _, ok := b.envs[envID]; !ok {
+		return "", fmt.Errorf("mock backend: unknown envID %q", envID)
+	}
+	return b.gatewayIP, b.gatewayErr
+}
+
+// MappedUID implements backend.Backend. The mock returns the host-side
+// UID SetMappedUID configured for envID, falling back to the
+// EnvSpec.UID the env was created with (or 0 when EnvSpec.UID was
+// nil). Setting mappedUIDErr via SetMappedUIDError overrides the
+// successful path so tests can drive the supervisor's "remap probe
+// failed" refuse-to-start branch.
+func (b *Backend) MappedUID(envID string) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.calls = append(b.calls, Call{Method: "MappedUID", EnvID: envID})
+	if _, ok := b.envs[envID]; !ok {
+		return 0, fmt.Errorf("mock backend: unknown envID %q", envID)
+	}
+	if b.mappedUIDErr != nil {
+		return 0, b.mappedUIDErr
+	}
+	if hostUID, ok := b.mappedUIDs[envID]; ok {
+		return hostUID, nil
+	}
+	env := b.envs[envID]
+	if env != nil && env.spec.UID != nil {
+		return *env.spec.UID, nil
+	}
+	return 0, nil
+}
+
+// ProbeImage implements backend.Backend. The mock returns the
+// (homeTarget, err) tuple SetProbeImage configured. When no override
+// is set, the mock returns ("", nil) so the supervisor's HomeTarget
+// resolver falls back to the documented "/root" default per
+// Plan §0.5; tests that want to exercise the resolver explicitly
+// call SetProbeImage with a non-empty path.
+func (b *Backend) ProbeImage(template string, uid *int) (string, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.calls = append(b.calls, Call{Method: "ProbeImage"})
+	return b.probeImageResult, b.probeImageErr
 }
 
 // compile-time check that Backend satisfies backend.Backend.

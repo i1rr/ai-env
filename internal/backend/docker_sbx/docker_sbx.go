@@ -265,6 +265,19 @@ func (b *Backend) Create(spec backend.EnvSpec) (string, error) {
 		args = append(args, "--template", spec.Template)
 	}
 	args = append(args, "--workspace", spec.WorkspacePath)
+	// Plan §0.5: forward EnvSpec.BindMounts as `--bind <src>:<tgt>[:ro]`
+	// entries. sbx accepts the same colon-separated form docker does;
+	// adapters that gain richer mount semantics override this method.
+	for _, m := range spec.BindMounts {
+		entry := fmt.Sprintf("%s:%s", m.Source, m.Target)
+		if m.ReadOnly {
+			entry += ":ro"
+		}
+		args = append(args, "--bind", entry)
+	}
+	if spec.UID != nil {
+		args = append(args, "--user", fmt.Sprintf("%d", *spec.UID))
+	}
 	for k, v := range spec.Labels {
 		args = append(args, "--label", fmt.Sprintf("%s=%s", k, v))
 	}
@@ -562,6 +575,51 @@ func (b *Backend) Destroy(envID string) error {
 	defer b.mu.Unlock()
 	delete(b.envs, envID)
 	return nil
+}
+
+// GatewayAddress implements backend.Backend. The tested sbx range does
+// not expose a stable gateway-IP endpoint; Plan §0.5 documents the
+// contract: backends that cannot report a gateway return ("", nil) so
+// the supervisor's ProviderProxy picker falls through to UnixSocket.
+// An unknown envID still returns an error so the supervisor's "env
+// not created" path is exercised.
+func (b *Backend) GatewayAddress(envID string) (string, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if _, ok := b.envs[envID]; !ok {
+		return "", fmt.Errorf("docker-sbx: unknown envID %q", envID)
+	}
+	return "", nil
+}
+
+// MappedUID implements backend.Backend. The docker-sbx adapter does
+// not have a documented userns-remap signal in the tested range; the
+// adapter returns EnvSpec.UID verbatim (or 0 when nil). Operators
+// running sbx on a host with dockerd userns-remap enabled must
+// configure the host's remap policy out of band; the capability
+// detector's `RequiresMappedUID` bit will surface the mismatch.
+func (b *Backend) MappedUID(envID string) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	env, ok := b.envs[envID]
+	if !ok {
+		return 0, fmt.Errorf("docker-sbx: unknown envID %q", envID)
+	}
+	if env.spec.UID != nil {
+		return *env.spec.UID, nil
+	}
+	return 0, nil
+}
+
+// ProbeImage implements backend.Backend. The sbx CLI's template layer
+// is opaque: there is no documented way to read the underlying
+// image's `/etc/passwd` without first running the template (which
+// the supervisor will not do at Create time). Plan §0.5: the
+// adapter returns ("", nil) and the supervisor falls back to the
+// policy default `/root`. Operators with non-root templates set
+// EnvSpec.HomeTarget explicitly in policy.yaml.
+func (b *Backend) ProbeImage(template string, uid *int) (string, error) {
+	return "", nil
 }
 
 // ioReader narrows an ExecOptions.Stdin (declared as a tiny inline

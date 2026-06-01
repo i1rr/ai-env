@@ -54,8 +54,16 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rivan1986/ai-env/internal/backend"
 	"github.com/rivan1986/ai-env/internal/run"
 )
+
+// Compile-time check that the in-memory RecordingBackendEventSink
+// below satisfies the production `backend.BackendEventSink` interface
+// Plan §0.5 introduces. Tests that wire the recorder into code that
+// asks for the production interface (e.g. the backend adapters) catch
+// any future signature drift at build time.
+var _ backend.BackendEventSink = (*RecordingBackendEventSink)(nil)
 
 // shortTempPrefix is the prefix passed to os.MkdirTemp in the
 // short-path tempdir helper. The "aies" stem is short on purpose so a

@@ -444,6 +444,24 @@ func (b *Backend) Start(envID string) (backend.RuntimeInfo, error) {
 		"-v", fmt.Sprintf("%s:%s", env.spec.WorkspacePath, "/workspace"),
 		"-w", "/workspace",
 	}
+	// Plan §0.5: install every EnvSpec.BindMount as `-v
+	// <source>:<target>[:ro]`. Mode is informational on docker (the
+	// daemon does not expose a per-mount mode flag); the supervisor
+	// uses it only on the in-sandbox `mappedUID` chown path it
+	// handles itself via CopyIn after Start.
+	for _, m := range env.spec.BindMounts {
+		spec := fmt.Sprintf("%s:%s", m.Source, m.Target)
+		if m.ReadOnly {
+			spec += ":ro"
+		}
+		args = append(args, "-v", spec)
+	}
+	// EnvSpec.UID: docker honors `--user <uid>` for the entrypoint.
+	// We translate a non-nil UID to the flag; nil means "use the
+	// image's default user".
+	if env.spec.UID != nil {
+		args = append(args, "--user", fmt.Sprintf("%d", *env.spec.UID))
+	}
 	for k, v := range env.spec.Labels {
 		args = append(args, "--label", fmt.Sprintf("%s=%s", k, v))
 	}
@@ -716,6 +734,56 @@ func (b *Backend) Destroy(envID string) error {
 	defer b.mu.Unlock()
 	delete(b.envs, envID)
 	return nil
+}
+
+// GatewayAddress implements backend.Backend. The rootless docker
+// fallback has no bridge-gateway concept that is meaningful to the
+// supervisor: when the container is started with `--network none` the
+// gateway is empty; when started with `--network host` the container
+// shares the host's network so the "gateway address" is whatever the
+// host uses for its outbound default route, which the ProviderProxy
+// picker does not consume. Plan §0.5 documents the contract: backends
+// that cannot report a gateway return ("", nil) so the supervisor
+// falls through to the UnixSocket alternative. We return an unknown-
+// envID error so the supervisor's "env not created" path is still
+// exercised.
+func (b *Backend) GatewayAddress(envID string) (string, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if _, ok := b.envs[envID]; !ok {
+		return "", fmt.Errorf("docker: unknown envID %q", envID)
+	}
+	return "", nil
+}
+
+// MappedUID implements backend.Backend. The rootless docker fallback
+// does not participate in dockerd's userns-remap mode (rootless docker
+// runs the daemon in the operator's userns and dockerd's userns-remap
+// flag is a no-op there); the host-side UID the in-sandbox UID maps to
+// is always the EnvSpec.UID value the supervisor supplied (or 0 when
+// EnvSpec.UID was nil). Plan §0.5: backends that do not implement
+// remap return the input UID verbatim.
+func (b *Backend) MappedUID(envID string) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	env, ok := b.envs[envID]
+	if !ok {
+		return 0, fmt.Errorf("docker: unknown envID %q", envID)
+	}
+	if env.spec.UID != nil {
+		return *env.spec.UID, nil
+	}
+	return 0, nil
+}
+
+// ProbeImage implements backend.Backend. The rootless docker fallback
+// could parse the image's `/etc/passwd` via `docker run --rm <image>
+// cat /etc/passwd`, but the plan's iter-4 rationale (Plan §0.5) is
+// that probing trusts untrusted image output. The fallback therefore
+// returns ("", nil) so the supervisor falls back to the policy
+// default `/root` per Plan §0.5.
+func (b *Backend) ProbeImage(template string, uid *int) (string, error) {
+	return "", nil
 }
 
 // NetworkPolicyAdapter is the network.NetworkPolicyAdapter the

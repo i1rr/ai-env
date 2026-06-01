@@ -134,7 +134,7 @@ All five per-subsystem streams stay as **source of truth**. `leaks.jsonl` is the
 
 **Batch 0.4 — Capability detection** [x] — as iter-3 + Linux userns-remap detection.
 
-**Batch 0.5 — BindMount + EnvSpec + BackendEventSink + GatewayAddress + MappedUID + ProbeImage**
+**Batch 0.5 — BindMount + EnvSpec + BackendEventSink + GatewayAddress + MappedUID + ProbeImage** [x]
 - `internal/backend/backend.go`:
   - `type BindMount struct { Source, Target string; ReadOnly bool; Mode os.FileMode }`
   - `EnvSpec.BindMounts []BindMount`, `EnvSpec.UID *int`, `EnvSpec.HomeTarget string` (resolved by supervisor before Create; reads image's `/etc/passwd` for the UID; fallback `/root`).

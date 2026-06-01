@@ -137,6 +137,16 @@ func (b *stubBackend) Stats(envID string) (backend.ResourceStats, error) {
 }
 func (b *stubBackend) Destroy(envID string) error { return nil }
 
+// GatewayAddress / MappedUID / ProbeImage are Plan §0.5 additions to
+// the Backend interface. The stub backend has no bridge gateway, no
+// userns-remap mapping, and cannot probe an image; the defaults match
+// the other no-op fallback backends so the supervisor's "no gateway"
+// / "EnvSpec.UID verbatim" / "use the policy default HomeTarget"
+// paths are exercised under this stub.
+func (b *stubBackend) GatewayAddress(envID string) (string, error)          { return "", nil }
+func (b *stubBackend) MappedUID(envID string) (int, error)                  { return 0, nil }
+func (b *stubBackend) ProbeImage(template string, uid *int) (string, error) { return "", nil }
+
 func (b *stubBackend) StopCalls() []stopCall {
 	b.mu.Lock()
 	defer b.mu.Unlock()
