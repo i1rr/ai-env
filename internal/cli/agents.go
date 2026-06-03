@@ -315,8 +315,10 @@ func writeDoctorLine(w io.Writer, pass bool, check, reason string) {
 // first mode the host can plausibly satisfy:
 //
 //   - backend_managed: cannot be verified without an active backend, so
-//     it is reported as informational ("requires backend") and never on
-//     its own marked PASS.
+//     it is reported as deferred-to-run-time and marked PASS.
+//   - brokered: same shape as backend_managed — the broker contract is
+//     validated by the supervisor at run time (githubbroker /
+//     provider-proxy plumbing), so doctor reports it PASS and defers.
 //   - provider_proxy: cannot be verified without secrets.local.yaml
 //     plumbing (Plan 07); reported as informational.
 //   - raw_env_explicit: requires the operator to pass
@@ -339,6 +341,9 @@ func evaluateCredentialMode(agentName string, cred config.AgentCredentialMode) (
 			continue
 		case "backend_managed":
 			notes = append(notes, "backend_managed (verified at run time)")
+			pass = true
+		case "brokered":
+			notes = append(notes, "brokered (validated at run time)")
 			pass = true
 		case "provider_proxy":
 			notes = append(notes, "provider_proxy (requires secrets.local.yaml)")

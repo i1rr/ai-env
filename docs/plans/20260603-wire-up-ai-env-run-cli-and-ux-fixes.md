@@ -41,10 +41,10 @@
 - Modify: `internal/cli/agents.go`
 - Modify: `internal/cli/agents_test.go`
 
-- [ ] В `evaluateCredentialMode` (`agents.go` ~ строка 332) добавить case `"brokered"` в switch: ставит `pass = true` и note `"brokered (validated at run time)"` (по аналогии с `backend_managed`).
-- [ ] Поправить `defaultAgentsConfig` в `internal/cli/new.go` если требуется, там `Default: "brokered"` уже стоит (verify).
-- [ ] Добавить unit-test в `agents_test.go`: контракт с `CredentialMode.Default = "brokered"` должен дать PASS, не FAIL.
-- [ ] `go test -race ./internal/cli/...`, должен проходить.
+- [x] В `evaluateCredentialMode` (`agents.go` ~ строка 332) добавить case `"brokered"` в switch: ставит `pass = true` и note `"brokered (validated at run time)"` (по аналогии с `backend_managed`).
+- [x] Поправить `defaultAgentsConfig` в `internal/cli/new.go` если требуется, там `Default: "brokered"` уже стоит (verify).
+- [x] Добавить unit-test в `agents_test.go`: контракт с `CredentialMode.Default = "brokered"` должен дать PASS, не FAIL.
+- [x] `go test -race ./internal/cli/...`, должен проходить.
 
 ### Task 2: Fix 'ai-env list' to fall back to .env-meta.json
 
