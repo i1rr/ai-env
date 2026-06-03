@@ -62,9 +62,9 @@
 **Files:**
 - Delete: `plans/README.md` (smaller fix per task description)
 
-- [ ] Удалить `plans/README.md`. Файл ссылается на `plan_v3_1.md` и `plan_01_foundation.md` (не существуют); каноничные планы живут в `archive/plan_01_cli.md` … `archive/plan_10_leak_coverage_hardening.md` и упоминаются из README/CHANGELOG.
-- [ ] Никаких тестов не требуется (доковый файл). Но проверить grep по репо: нет ли других файлов, которые ссылаются на `plans/README.md` или `plans/plan_*.md`. Если есть, заменить ссылку на `archive/`.
-- [ ] `go test ./...` (быстрая sanity-проверка) должен проходить.
+- [x] Удалить `plans/README.md`. Файл ссылается на `plan_v3_1.md` и `plan_01_foundation.md` (не существуют); каноничные планы живут в `archive/plan_01_cli.md` … `archive/plan_10_leak_coverage_hardening.md` и упоминаются из README/CHANGELOG.
+- [x] Никаких тестов не требуется (доковый файл). Но проверить grep по репо: нет ли других файлов, которые ссылаются на `plans/README.md` или `plans/plan_*.md`. Если есть, заменить ссылку на `archive/`.
+- [x] `go test ./...` (быстрая sanity-проверка) должен проходить.
 
 ### Task 4: Wire up 'ai-env run' CLI subcommand
 
