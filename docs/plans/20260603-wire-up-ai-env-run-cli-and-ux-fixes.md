@@ -120,11 +120,11 @@
 
 ### Task 6: Verify acceptance criteria
 
-- [ ] Прогон `go build ./...`.
-- [ ] Прогон `go test -race ./...`, все юнит-тесты зелёные.
-- [ ] Прогон `go vet ./...` и `staticcheck ./...` (если в репо настроен), нет новых предупреждений.
-- [ ] `go test -tags=acceptance -count=1 ./tests/acceptance/...` локально с `AI_ENV_ACCEPTANCE=1`, фиксируем какие из тестов теперь действительно прогоняются (не SKIP), какие требуют docker. Это manual smoke step, не строгий чекбокс.
-- [ ] Сверить CLI с `archive/full_plan.md` §36 шаги 1-18 и §37 пункт 4-10, каждая lifecycle-фаза supervisor отражается в `lifecycle.jsonl`.
+- [x] Прогон `go build ./...`. (verified: clean build)
+- [x] Прогон `go test -race ./...`, все юнит-тесты зелёные. (verified: все 27 пакетов зелёные, включая `internal/cli`, `internal/run`, `internal/secrets`)
+- [x] Прогон `go vet ./...` и `staticcheck ./...` (если в репо настроен), нет новых предупреждений. (`go vet ./...` чист; `staticcheck` не установлен в репо — по плану это условный чекбокс)
+- [x] `go test -tags=acceptance -count=1 ./tests/acceptance/...` локально с `AI_ENV_ACCEPTANCE=1`, фиксируем какие из тестов теперь действительно прогоняются (не SKIP), какие требуют docker. Это manual smoke step, не строгий чекбокс. (verified: весь suite PASS, единственный SKIP — `TestSection32_Dependency/Bullet2_MaliciousPostinstallCannotAccessHostSecrets`, который явно делегирует docker-проверку в `AI_ENV_BACKEND_INTEGRATION` suite под `internal/backend/docker_sbx`)
+- [x] Сверить CLI с `archive/full_plan.md` §36 шаги 1-18 и §37 пункт 4-10, каждая lifecycle-фаза supervisor отражается в `lifecycle.jsonl`. (verified: §36 steps 1-3 покрыты `RunRun` (`LoadAIEnv` + workspace.MetadataPath + secrets); steps 4-5 `run.CreateRunDirectory` + `task.md`; steps 6-7 backend probe + agent contract через `claude.New().Plan(req, probe, env)`; steps 8-11 — canonical 11-step pre-launch supervisor sequence (`supervisor_sequence.go`); steps 12-14 — `streams.go` + state machine; steps 15-18 — diff collector + scan hook + export gates + final-summary. §37 пункты 4-10 покрыты лончером Claude в сэндбоксе, supervisor timeout, broker push-policy и egress rules+observer. Все фазы emit lifecycle verbs из `lifecycle_verbs.go`: `control_socket_started`, `proxy_started`, `gateway_started`, `observer_started`, `broker_started`, и их зеркальные `_stopped`/`_unavailable`/`_degraded` записи.)
 
 ### Task 7: Update documentation
 
