@@ -2,6 +2,8 @@ module github.com/i1rr/ai-env
 
 go 1.25
 
+toolchain go1.25.11
+
 require (
 	github.com/spf13/cobra v1.8.1
 	gopkg.in/yaml.v3 v3.0.1
