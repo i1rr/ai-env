@@ -71,8 +71,28 @@ func TestRunStatus_NoRunsYet(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunStatus on fresh project: %v", err)
 	}
-	if !strings.Contains(out.String(), "no runs") && !strings.Contains(out.String(), "(none recorded yet)") {
-		t.Errorf("expected empty-state hint in stdout, got:\n%s", out.String())
+	s := out.String()
+	if !strings.Contains(s, "no runs") && !strings.Contains(s, "(none recorded yet)") {
+		t.Errorf("expected empty-state hint in stdout, got:\n%s", s)
+	}
+	// The hint must match the cobra Use string of `ai-env run` so the
+	// operator can copy-paste it verbatim. --task is required, --agent is
+	// optional (defaults to project.default_agent), --continue is the
+	// follow-up-run knob. If the cobra Use of newRunCmd changes, this
+	// assertion forces the hint to follow.
+	wantHintBits := []string{
+		"ai-env run fix-tests",
+		`--task "..."`,
+		"[--agent <agent>]",
+		"[--continue]",
+		"ai-env run -h",
+		"--shell-shim",
+		"--observer-mode",
+	}
+	for _, w := range wantHintBits {
+		if !strings.Contains(s, w) {
+			t.Errorf("status no-runs hint missing %q:\n%s", w, s)
+		}
 	}
 }
 

@@ -113,10 +113,10 @@
 - Modify: `internal/cli/status.go`
 - Modify: `internal/cli/status_test.go`
 
-- [ ] В `RunStatus` (`status.go` строка 105) подкорректировать строку hint так, чтобы она отражала фактический UX shipped-команды `ai-env run`: упомянуть `--shell-shim`/`--observer-mode` опционально или хотя бы убедиться что текст не вводит в заблуждение (сейчас: `Start one with ai-env run <env> --agent <agent> --task "..."`). Оставить минимальный hint, но проверить что точно соответствует реальному cobra-Usage из Task 4.
-- [ ] Если в Task 4 список флагов отличается, синхронизировать.
-- [ ] Обновить `status_test.go`: snapshot test на «no runs yet» должен ловить новую строку.
-- [ ] `go test -race ./internal/cli/...`, должен проходить.
+- [x] В `RunStatus` (`status.go` строка 105) подкорректировать строку hint так, чтобы она отражала фактический UX shipped-команды `ai-env run`: упомянуть `--shell-shim`/`--observer-mode` опционально или хотя бы убедиться что текст не вводит в заблуждение (сейчас: `Start one with ai-env run <env> --agent <agent> --task "..."`). Оставить минимальный hint, но проверить что точно соответствует реальному cobra-Usage из Task 4.
+- [x] Если в Task 4 список флагов отличается, синхронизировать.
+- [x] Обновить `status_test.go`: snapshot test на «no runs yet» должен ловить новую строку.
+- [x] `go test -race ./internal/cli/...`, должен проходить.
 
 ### Task 6: Verify acceptance criteria
 
