@@ -21,7 +21,7 @@ import (
 // RunAgentPlanner to test stubs and returns a deferred cleanup that
 // restores the production defaults. Tests use this so a parallel
 // future test does not see leaked seams.
-func withRunSeams(t *testing.T, bf func(name, mode string) (backend.Backend, error), planner func(ctx context.Context, agentName string, contract config.AgentEntry, req agents.Request, env agents.EnvironmentProbe) (agents.LaunchPlan, error)) {
+func withRunSeams(t *testing.T, bf func(name string, opts BackendFactoryOptions) (backend.Backend, error), planner func(ctx context.Context, agentName string, contract config.AgentEntry, req agents.Request, env agents.EnvironmentProbe) (agents.LaunchPlan, error)) {
 	t.Helper()
 	prevBF := BackendFactory
 	prevPlanner := RunAgentPlanner
@@ -74,7 +74,7 @@ func noopPlanner(_ context.Context, _ string, _ config.AgentEntry, req agents.Re
 // regardless of the requested name so tests can scaffold an
 // ai-env.yaml with sandbox.backend=docker-sbx (the production
 // default) without standing up a real container runtime.
-func mockBackendFactory(_ string, _ string) (backend.Backend, error) {
+func mockBackendFactory(_ string, _ BackendFactoryOptions) (backend.Backend, error) {
 	return mock.New(nil), nil
 }
 
@@ -183,7 +183,7 @@ func TestRunRun_FallbackBackend(t *testing.T) {
 	// notice is printed to stderr.
 	primaryCalled := false
 	fallbackCalled := false
-	factory := func(name, mode string) (backend.Backend, error) {
+	factory := func(name string, _ BackendFactoryOptions) (backend.Backend, error) {
 		switch name {
 		case "docker-sbx":
 			primaryCalled = true
@@ -246,8 +246,12 @@ func TestRunRun_Continue_LinksPreviousRun(t *testing.T) {
 		t.Fatalf("RunNew: %v", err)
 	}
 
-	// First run, no --continue. Capture its run id from the run dir
-	// once it completes.
+	// First run, no --continue. The mock backend lets it finish in
+	// StateCompleted, which is NOT a continuation-eligible terminal:
+	// per the supervisor's `terminalSupportsContinue`, only
+	// StateKilledByUser / StateTimedOut / StateKilledIdle qualify. We
+	// rewrite the first run's record below so PrepareContinuation
+	// accepts it.
 	var firstOut, firstErr bytes.Buffer
 	if err := RunRun(RunOptions{
 		EnvName: "demo",
@@ -266,10 +270,23 @@ func TestRunRun_Continue_LinksPreviousRun(t *testing.T) {
 	}
 	firstID := first.ID
 
-	// Sleep a beat so the run ID's timestamp portion differs even on
-	// fast hosts (the hex suffix is also a guard, but we want the
-	// LatestRunForEnv lookup to deterministically pick the older one
-	// as the predecessor).
+	// Promote the first run's terminal to a continuation-eligible
+	// state so PrepareContinuation accepts it. Without this rewrite the
+	// second RunRun(--continue) would correctly refuse with
+	// ContinueErrPreviousRunNotContinuable.
+	firstRec, recErr := run.ReadRecord(first.Path)
+	if recErr != nil {
+		t.Fatalf("ReadRecord first: %v", recErr)
+	}
+	firstRec.State = run.StateKilledByUser
+	if err := run.WriteRecord(first.Path, firstRec); err != nil {
+		t.Fatalf("WriteRecord first: %v", err)
+	}
+
+	// Sleep a beat so the new run ID's timestamp portion differs even
+	// on fast hosts (the hex suffix is also a guard, but we want
+	// LatestRunForEnv to deterministically pick the older one as the
+	// predecessor).
 	time.Sleep(1100 * time.Millisecond)
 
 	var secondOut, secondErr bytes.Buffer
@@ -300,6 +317,76 @@ func TestRunRun_Continue_LinksPreviousRun(t *testing.T) {
 	}
 	if *rec.LinkedPreviousRun != firstID {
 		t.Errorf("LinkedPreviousRun = %s, want %s", *rec.LinkedPreviousRun, firstID)
+	}
+}
+
+// TestRunRun_Continue_RejectsNonContinuableTerminal pins the new
+// gate: when the previous run ended in StateCompleted (or any other
+// non-continuable terminal), `--continue` must refuse rather than
+// silently writing a misleading linked_previous_run.
+func TestRunRun_Continue_RejectsNonContinuableTerminal(t *testing.T) {
+	withRunSeams(t, mockBackendFactory, noopPlanner)
+
+	cwd := shortTempDir(t)
+	if err := RunNew(NewOptions{EnvName: "demo", Cwd: cwd, Stdout: &bytes.Buffer{}}); err != nil {
+		t.Fatalf("RunNew: %v", err)
+	}
+
+	if err := RunRun(RunOptions{
+		EnvName: "demo",
+		Agent:   "claude",
+		Task:    "first round",
+		Cwd:     cwd,
+		Stdout:  &bytes.Buffer{},
+		Stderr:  &bytes.Buffer{},
+	}); err != nil {
+		t.Fatalf("first RunRun: %v", err)
+	}
+
+	time.Sleep(1100 * time.Millisecond)
+
+	err := RunRun(RunOptions{
+		EnvName:  "demo",
+		Agent:    "claude",
+		Task:     "second round",
+		Continue: true,
+		Cwd:      cwd,
+		Stdout:   &bytes.Buffer{},
+		Stderr:   &bytes.Buffer{},
+	})
+	if err == nil {
+		t.Fatal("expected RunRun --continue against StateCompleted predecessor to fail")
+	}
+	if !strings.Contains(err.Error(), "cannot be continued") {
+		t.Errorf("expected error to mention cannot be continued, got %v", err)
+	}
+}
+
+// TestRunRun_Continue_RejectsNoPreviousRun pins the second new gate:
+// when the env has no prior run, `--continue` must fail loudly rather
+// than silently degrade to a fresh run.
+func TestRunRun_Continue_RejectsNoPreviousRun(t *testing.T) {
+	withRunSeams(t, mockBackendFactory, noopPlanner)
+
+	cwd := shortTempDir(t)
+	if err := RunNew(NewOptions{EnvName: "demo", Cwd: cwd, Stdout: &bytes.Buffer{}}); err != nil {
+		t.Fatalf("RunNew: %v", err)
+	}
+
+	err := RunRun(RunOptions{
+		EnvName:  "demo",
+		Agent:    "claude",
+		Task:     "first ever",
+		Continue: true,
+		Cwd:      cwd,
+		Stdout:   &bytes.Buffer{},
+		Stderr:   &bytes.Buffer{},
+	})
+	if err == nil {
+		t.Fatal("expected RunRun --continue against env with no runs to fail")
+	}
+	if !strings.Contains(err.Error(), "no previous run") {
+		t.Errorf("expected error to mention no previous run, got %v", err)
 	}
 }
 

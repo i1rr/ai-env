@@ -69,6 +69,24 @@ type RunOptions struct {
 	Stderr io.Writer
 }
 
+// BackendFactoryOptions carries the ai-env.yaml sandbox-section knobs
+// the docker / podman adapters need at construction time so an
+// operator-supplied `accept_reduced_isolation: true` actually reaches
+// the Detect gate. Without this, the docker fallback rejects
+// autonomous mode with "requires --accept-reduced-isolation" even
+// when the YAML field is set.
+type BackendFactoryOptions struct {
+	// Mode is the project's default_mode (autonomous / interactive /
+	// dry-run). docker/podman use it to decide whether reduced
+	// isolation must be explicitly accepted.
+	Mode string
+
+	// AcceptReducedIsolation mirrors sandbox.accept_reduced_isolation.
+	// True is the operator's acknowledgement that the rootless
+	// docker/podman fallback is acceptable for autonomous runs.
+	AcceptReducedIsolation bool
+}
+
 // BackendFactory is the package-level seam unit tests use to
 // substitute the real backend constructors with the in-memory mock
 // backend. Production keeps the default mapping that returns the
@@ -81,16 +99,22 @@ var BackendFactory = defaultBackendFactory
 // backend.Backend instance. Unknown names produce an error so a
 // misconfigured project fails loudly rather than silently picking
 // the wrong adapter.
-func defaultBackendFactory(name, mode string) (backend.Backend, error) {
+func defaultBackendFactory(name string, opts BackendFactoryOptions) (backend.Backend, error) {
 	switch name {
 	case "mock":
 		return mock.New(nil), nil
 	case "docker-sbx":
 		return docker_sbx.New(docker_sbx.Options{}), nil
 	case "docker":
-		return docker.New(docker.Options{Mode: mode}), nil
+		return docker.New(docker.Options{
+			Mode:                   opts.Mode,
+			AcceptReducedIsolation: opts.AcceptReducedIsolation,
+		}), nil
 	case "podman":
-		return podman.New(podman.Options{Mode: mode}), nil
+		return podman.New(podman.Options{
+			Mode:                   opts.Mode,
+			AcceptReducedIsolation: opts.AcceptReducedIsolation,
+		}), nil
 	case "", "none":
 		return nil, fmt.Errorf("backend identifier is empty")
 	default:
@@ -273,34 +297,44 @@ func RunRun(opts RunOptions) error {
 		return fmt.Errorf("ai-env run: backend.Create: %w", err)
 	}
 
-	runID, err := run.GenerateRunID()
-	if err != nil {
-		_ = bk.Destroy(envID)
-		return fmt.Errorf("ai-env run: generate run id: %w", err)
-	}
-	runDir, err := run.CreateRunDirectory(aiEnvDir, runID, time.Now())
-	if err != nil {
-		_ = bk.Destroy(envID)
-		return fmt.Errorf("ai-env run: create run directory: %w", err)
-	}
-	if writeErr := run.WriteTask(aiEnvDir, runID, opts.Task); writeErr != nil {
-		_ = bk.Destroy(envID)
-		return fmt.Errorf("ai-env run: %w", writeErr)
-	}
-
-	var linkedPrev *string
+	var (
+		runID      string
+		runDir     run.RunDirectory
+		linkedPrev *string
+	)
 	if opts.Continue {
-		if prev, prevErr := run.LatestRunForEnv(aiEnvDir, opts.EnvName); prevErr == nil {
-			id := prev.ID
-			linkedPrev = &id
-		} else if !errors.Is(prevErr, run.ErrNoRuns) {
-			fmt.Fprintf(opts.Stderr, "warning: --continue lookup failed: %v\n", prevErr)
+		cont, contErr := run.PrepareContinuation(aiEnvDir, opts.EnvName, opts.Task, time.Now())
+		if contErr != nil {
+			_ = bk.Destroy(envID)
+			return fmt.Errorf("ai-env run: %w", contErr)
 		}
+		runID = cont.NewRun.ID
+		runDir = cont.NewRun
+		linkedPrev = run.LinkedPreviousRunPtr(cont.PreviousRunID)
+	} else {
+		newID, idErr := run.GenerateRunID()
+		if idErr != nil {
+			_ = bk.Destroy(envID)
+			return fmt.Errorf("ai-env run: generate run id: %w", idErr)
+		}
+		newDir, dirErr := run.CreateRunDirectory(aiEnvDir, newID, time.Now())
+		if dirErr != nil {
+			_ = bk.Destroy(envID)
+			return fmt.Errorf("ai-env run: create run directory: %w", dirErr)
+		}
+		if writeErr := run.WriteTask(aiEnvDir, newID, opts.Task); writeErr != nil {
+			_ = bk.Destroy(envID)
+			_ = os.RemoveAll(newDir.Path)
+			return fmt.Errorf("ai-env run: %w", writeErr)
+		}
+		runID = newID
+		runDir = newDir
 	}
 
 	cs, csErr := run.NewControlSocket(run.ControlSocketOptions{RunDir: runDir.Path})
 	if csErr != nil {
 		_ = bk.Destroy(envID)
+		_ = os.RemoveAll(runDir.Path)
 		return fmt.Errorf("ai-env run: control socket: %w", csErr)
 	}
 
@@ -336,6 +370,7 @@ func RunRun(opts RunOptions) error {
 		policyPath := filepath.Join(aiEnvDir, "policy.yaml")
 		if _, statErr := os.Stat(policyPath); statErr != nil {
 			_ = bk.Destroy(envID)
+			_ = os.RemoveAll(runDir.Path)
 			if os.IsNotExist(statErr) {
 				return fmt.Errorf("ai-env run: --shell-shim requires %s; run `ai-env policy init` first", policyPath)
 			}
@@ -344,8 +379,9 @@ func RunRun(opts RunOptions) error {
 		superOpts.ShellShim = true
 		superOpts.ShellShimDir = filepath.Join(runDir.Path, "shim")
 		superOpts.PolicyEnginePath = policyPath
-		if mkErr := os.MkdirAll(superOpts.ShellShimDir, 0o755); mkErr != nil {
+		if mkErr := os.MkdirAll(superOpts.ShellShimDir, 0o700); mkErr != nil {
 			_ = bk.Destroy(envID)
+			_ = os.RemoveAll(runDir.Path)
 			return fmt.Errorf("ai-env run: create shim dir: %w", mkErr)
 		}
 	}
@@ -353,6 +389,7 @@ func RunRun(opts RunOptions) error {
 	supervisor, sErr := run.NewSupervisor(superOpts)
 	if sErr != nil {
 		_ = bk.Destroy(envID)
+		_ = os.RemoveAll(runDir.Path)
 		return fmt.Errorf("ai-env run: %w", sErr)
 	}
 
@@ -361,12 +398,13 @@ func RunRun(opts RunOptions) error {
 		return fmt.Errorf("ai-env run: %w", runErr)
 	}
 
+	// The supervisor's printContinueSuggestion already writes the
+	// suggestion to UserOutput (= opts.Stdout) for continuable terminals.
+	// We deliberately do NOT echo result.ContinueSuggestion here to
+	// avoid a duplicate line on `--continue`-eligible terminals.
 	fmt.Fprintf(opts.Stdout, "run id:    %s\n", runID)
 	fmt.Fprintf(opts.Stdout, "run dir:   %s\n", runDir.Path)
 	fmt.Fprintf(opts.Stdout, "state:     %s\n", result.FinalState)
-	if result.ContinueSuggestion != "" {
-		fmt.Fprintln(opts.Stdout, result.ContinueSuggestion)
-	}
 
 	if result.FinalState != run.StateCompleted {
 		return fmt.Errorf("ai-env run: terminal state %s (exit %d)", result.FinalState, result.ExitCode)
@@ -380,8 +418,12 @@ func RunRun(opts RunOptions) error {
 // fallback is selected so the operator sees the substitution rather
 // than wondering why a different adapter ran.
 func selectBackend(cfg *config.AIEnvConfig, stderr io.Writer) (backend.Backend, string, error) {
+	bfOpts := BackendFactoryOptions{
+		Mode:                   cfg.Project.DefaultMode,
+		AcceptReducedIsolation: cfg.Sandbox.AcceptReducedIsolation,
+	}
 	primary := cfg.Sandbox.Backend
-	bk, err := BackendFactory(primary, cfg.Project.DefaultMode)
+	bk, err := BackendFactory(primary, bfOpts)
 	if err != nil {
 		return nil, "", fmt.Errorf("construct backend %q: %w", primary, err)
 	}
@@ -393,7 +435,7 @@ func selectBackend(cfg *config.AIEnvConfig, stderr io.Writer) (backend.Backend, 
 	if fallback == "" || fallback == "none" {
 		return nil, "", fmt.Errorf("backend %q unavailable: %s", primary, status.Message)
 	}
-	fbBk, fbErr := BackendFactory(fallback, cfg.Project.DefaultMode)
+	fbBk, fbErr := BackendFactory(fallback, bfOpts)
 	if fbErr != nil {
 		return nil, "", fmt.Errorf("construct fallback backend %q: %w", fallback, fbErr)
 	}
