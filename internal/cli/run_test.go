@@ -394,6 +394,38 @@ func TestRunRun_Continue_RejectsNoPreviousRun(t *testing.T) {
 	}
 }
 
+// TestRunRun_ObserverModeStrict_Rejected pins the CLI-level gate that
+// keeps `--observer-mode strict` from being silently a no-op. Until the
+// concrete egress.ChooseObserver is wired into RunRun, strict mode
+// would degrade to "no observer attached" (because EgressObserver is
+// nil), which is the exact opposite of the fail-closed contract the
+// cobra flag advertises. The CLI must reject it loudly so the operator
+// chooses auto / disabled explicitly.
+func TestRunRun_ObserverModeStrict_Rejected(t *testing.T) {
+	withRunSeams(t, mockBackendFactory, noopPlanner)
+
+	cwd := shortTempDir(t)
+	if err := RunNew(NewOptions{EnvName: "demo", Cwd: cwd, Stdout: &bytes.Buffer{}}); err != nil {
+		t.Fatalf("RunNew: %v", err)
+	}
+
+	err := RunRun(RunOptions{
+		EnvName:      "demo",
+		Agent:        "claude",
+		Task:         "exercise strict gate",
+		ObserverMode: "strict",
+		Cwd:          cwd,
+		Stdout:       &bytes.Buffer{},
+		Stderr:       &bytes.Buffer{},
+	})
+	if err == nil {
+		t.Fatal("expected RunRun with --observer-mode strict to fail until observer is wired")
+	}
+	if !strings.Contains(err.Error(), "strict") {
+		t.Errorf("expected error to mention strict, got %v", err)
+	}
+}
+
 // TestCredentialModeForRecord pins the agents → run-record mapping: the
 // brokered synonym must collapse to backend_managed so run.json never
 // carries an unknown literal, and the canonical modes must round-trip.

@@ -189,6 +189,18 @@ func RunRun(opts RunOptions) error {
 	if err != nil {
 		return fmt.Errorf("ai-env run: %w", err)
 	}
+	// `--observer-mode strict` advertises "abort if capability missing"
+	// (see cmd/ai-env/main.go newRunCmd flag help). The concrete
+	// egress.ChooseObserver wiring is not yet implemented, so RunRun
+	// passes a nil EgressObserver to the supervisor and
+	// startEgressObserver short-circuits before the mode check. Accepting
+	// strict here would silently degrade to auto/disabled — the exact
+	// opposite of the fail-closed contract. Reject it up front so the
+	// operator sees a clear error instead of an apparently-successful
+	// strict run with no observer attached.
+	if observerMode == egress.EgressObserverModeStrict {
+		return errors.New("ai-env run: --observer-mode strict is not yet wired (egress observer not implemented); use --observer-mode auto or disabled")
+	}
 
 	aiEnvDir, err := findAIEnvDir(opts.Cwd)
 	if err != nil {
@@ -398,6 +410,22 @@ func RunRun(opts RunOptions) error {
 		return fmt.Errorf("ai-env run: %w", sErr)
 	}
 
+	// Route SIGINT / SIGTERM / SIGHUP into supervisor.Cancel so a Ctrl-C
+	// at the host shell triggers the supervisor's canonical 9-step
+	// teardown (BackendDestroy, control socket Stop, terminal run.json,
+	// final lifecycle verb). Without this, the parent dies immediately
+	// and the env/control socket/run state are left to the OS to clean
+	// up best-effort. The supervisor itself documents this exact call
+	// shape (see internal/run/supervisor_signal.go).
+	stopSignals, sigErr := run.InstallSignalHandlers(supervisor)
+	if sigErr != nil {
+		_ = cs.Stop()
+		_ = bk.Destroy(envID)
+		_ = os.RemoveAll(runDir.Path)
+		return fmt.Errorf("ai-env run: %w", sigErr)
+	}
+	defer stopSignals()
+
 	result, runErr := supervisor.Run(context.Background())
 	if runErr != nil {
 		return fmt.Errorf("ai-env run: %w", runErr)
@@ -453,6 +481,16 @@ func selectBackend(cfg *config.AIEnvConfig, stderr io.Writer) (backend.Backend, 
 	}
 	status := bk.Detect()
 	if status.Available {
+		// Surface the version-incompatibility hint when the adapter
+		// reports Available but flags the runtime as outside the tested
+		// range. The adapter's own Message documents the canonical
+		// follow-up (a future --allow-untested-backend-version flag); we
+		// print it as a notice today so an operator pinning an untested
+		// sbx release sees the warning instead of running silently
+		// against an unsupported backend.
+		if !status.VersionSupported && strings.TrimSpace(status.Message) != "" {
+			fmt.Fprintf(stderr, "notice: backend %q: %s\n", primary, status.Message)
+		}
 		return bk, primary, nil
 	}
 	fallback := cfg.Sandbox.FallbackBackend

@@ -120,7 +120,7 @@ func newRunCmd() *cobra.Command {
 	cmd.Flags().String("task", "", "Verbatim task prompt body forwarded to the agent via stdin (required)")
 	cmd.Flags().Bool("continue", false, "Link this run to the env's most recent previous run via run.json.linked_previous_run")
 	cmd.Flags().Bool("shell-shim", false, "Wire the optional shell-shim prototype that intercepts in-sandbox shell invocations (Plan §5.5 step 10)")
-	cmd.Flags().String("observer-mode", "auto", "Egress observer policy: auto (best-effort, degrade on capability misses), strict (abort if capability missing), disabled (skip the observer entirely)")
+	cmd.Flags().String("observer-mode", "auto", "Egress observer policy: auto (best-effort, degrade on capability misses) or disabled (skip the observer entirely). 'strict' is reserved for a future release that wires the concrete egress.ChooseObserver and is rejected today.")
 	_ = cmd.MarkFlagRequired("task")
 	return cmd
 }
