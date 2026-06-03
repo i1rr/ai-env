@@ -1,2 +1,5 @@
 .plan-executor/
 /ai-env
+.DS_Store
+.ai-env/
+.audit/
