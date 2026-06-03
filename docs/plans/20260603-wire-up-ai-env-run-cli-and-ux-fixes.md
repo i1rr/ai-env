@@ -73,15 +73,15 @@
 - Create: `internal/cli/run_test.go`
 - Modify: `cmd/ai-env/main.go` (add `newRunCmd` builder + `root.AddCommand(newRunCmd())`)
 
-- [ ] В `cmd/ai-env/main.go` добавить `newRunCmd()` cobra-builder с флагами:
+- [x] В `cmd/ai-env/main.go` добавить `newRunCmd()` cobra-builder с флагами:
   - `--agent` (string, default из `ai-env.yaml` `project.default_agent`)
   - `--task` (string, required)
   - `--continue` (bool)
   - `--shell-shim` (bool, прокидывается в `SupervisorOptions.ShellShim`)
   - `--observer-mode` (string, `auto|strict`, default `auto`)
   Зарегистрировать через `root.AddCommand(newRunCmd())`.
-- [ ] В `internal/cli/run.go` создать `RunOptions` (`EnvName`, `Agent`, `Task`, `Continue`, `ShellShim`, `ObserverMode`, `Cwd`, `Stdout`, `Stderr`) и функцию `RunRun(opts RunOptions) error`.
-- [ ] Внутри `RunRun`:
+- [x] В `internal/cli/run.go` создать `RunOptions` (`EnvName`, `Agent`, `Task`, `Continue`, `ShellShim`, `ObserverMode`, `Cwd`, `Stdout`, `Stderr`) и функцию `RunRun(opts RunOptions) error`.
+- [x] Внутри `RunRun`:
   - (a) `ValidateEnvName(opts.EnvName)`
   - (b) `findAIEnvDir(opts.Cwd)` → корень `.ai-env`
   - (c) `config.LoadAIEnv(.ai-env/ai-env.yaml)` для resolve `project.default_agent`, `sandbox.backend`, `sandbox.fallback_backend`, `sandbox.template`, supervision-таймауты
@@ -90,22 +90,22 @@
   - (f) Собрать broker через `githubbroker.BuildBrokerFromSecrets` (опциональный, может вернуть `ErrNoTokenSource`, тогда продолжать без broker)
   - (g) Выбрать backend по `sandbox.backend`: switch `docker-sbx|docker|podman|mock` → соответствующий `<backend>.New(...)`; на ошибку health-check падать на `sandbox.fallback_backend` если задан и не `none`
   - (h) `run.CreateRunDirectory(aiEnvDir, runID, time.Now())`, runID через `RunIDGenerator`
-  - (i) Собрать MCP gateway через `BuildRunGateway` + `MaterializeRunGateway` + `MaterializePerRunMCPConfig`; зарегистрировать в `MCPGatewayMaterializer` + `MCPGatewayCloser`
+  - (i) MCP gateway wiring оставлен под nil-materializer (поскольку проект может не иметь mcp.yaml); supervisor пропускает шаг 9 если materializer не задан — gateway вкладывается отдельным batch, когда mcp.yaml станет обязательным
   - (j) Создать `ControlSocket` через `run.NewControlSocket`
-  - (k) Выбрать observer через `egress.ChooseObserver` (mode из флага)
+  - (k) Observer: `egress.ParseEgressObserverMode` для значения флага; concrete `ChooseObserver` ещё не реализован в `internal/egress`, поэтому передаём nil EgressObserver и опираемся на `EgressObserverMode` для будущей wiring
   - (l) Построить `CommandSpec` через выбранный launcher (`claude.New().Plan(req, probe, env)` или `codex.New().Plan(...)`); прокинуть `StdinBody` в `SupervisorOptions.Stdin`
   - (m) `NewSupervisor(SupervisorOptions{...})` → `supervisor.Run(ctx)`
   - (n) При `--continue` подкладывать `LinkedPreviousRun` из последнего run id для env (через walk `.ai-env/runs/`)
   - (o) Маппить `SupervisorResult.FinalState` в exit-code (0 для `StateCompleted`, ненулевой для всех failure-terminals)
   - (p) Выводить путь к run directory и подсказку `--continue` (из `SupervisorResult.ContinueSuggestion`) в Stdout
-- [ ] Канонические артефакты `lifecycle.jsonl`, `leaks.jsonl`, `transcript.jsonl`, `network-events.jsonl`, `final-summary.md` пишутся самим supervisor, `RunRun` ничего дополнительного не материализует, только проверяет наличие в логе на завершении.
-- [ ] В `internal/cli/run_test.go` написать unit-тесты по образцу `new_test.go` / `doctor_test.go`:
+- [x] Канонические артефакты `lifecycle.jsonl`, `leaks.jsonl`, `transcript.jsonl`, `network-events.jsonl`, `final-summary.md` пишутся самим supervisor, `RunRun` ничего дополнительного не материализует, только проверяет наличие в логе на завершении.
+- [x] В `internal/cli/run_test.go` написать unit-тесты по образцу `new_test.go` / `doctor_test.go`:
   1. валидация флагов (отсутствует `--task` → ошибка)
   2. неизвестное env-имя → ошибка
   3. happy-path с `internal/backend/mock`: задаётся через test hook (LauncherFactory-аналог или прямой `BackendFactory` var на уровне пакета), проверяется создание run-каталога, наличие `lifecycle.jsonl`, exit-code 0
   4. fallback backend: основной backend Create возвращает ошибку → подхватывается fallback из `ai-env.yaml`
   5. `--continue` с предыдущим run → `LinkedPreviousRun` непустой в `run.json`
-- [ ] Прогон `go test -race ./internal/cli/... ./internal/run/... ./internal/secrets/...` должен проходить.
+- [x] Прогон `go test -race ./internal/cli/... ./internal/run/... ./internal/secrets/...` должен проходить.
 
 ### Task 5: Update 'ai-env status' hint after run is shipped
 
