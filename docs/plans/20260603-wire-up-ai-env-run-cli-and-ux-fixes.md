@@ -128,7 +128,7 @@
 
 ### Task 7: Update documentation
 
-- [ ] В `README.md` обновить раздел «Manual smoke test» step 5: добавить пример `ai-env run demo --agent claude --task "..."` после `ai-env status demo`.
-- [ ] В `README.md` обновить упоминания на строках 402/414/418/434 о том, что `ai-env run` всё ещё deferred, теперь это shipped; переписать соответствующие абзацы.
-- [ ] `CHANGELOG.md`, добавить запись о новом `ai-env run` и трёх UX-фиксах.
-- [ ] Не требуется обновлять `CLAUDE.md` (внутренние паттерны не менялись).
+- [x] В `README.md` обновить раздел «Manual smoke test» step 5: добавить пример `ai-env run demo --agent claude --task "..."` после `ai-env status demo`.
+- [x] В `README.md` обновить упоминания на строках 402/414/418/434 о том, что `ai-env run` всё ещё deferred, теперь это shipped; переписать соответствующие абзацы. (also caught the stale "ai-env run will land in a later plan" line in `ai-env scan`'s `--run` doc on the way through)
+- [x] `CHANGELOG.md`, добавить запись о новом `ai-env run` и трёх UX-фиксах.
+- [x] Не требуется обновлять `CLAUDE.md` (внутренние паттерны не менялись).
