@@ -167,6 +167,14 @@ func TestRunRun_HappyPath_MockBackend(t *testing.T) {
 	if rec.EnvName != "demo" {
 		t.Errorf("run.json env_name = %s, want demo", rec.EnvName)
 	}
+
+	taskBody, err := os.ReadFile(run.TaskPath(aiEnvDir, latest.ID))
+	if err != nil {
+		t.Fatalf("read task.md: %v", err)
+	}
+	if !strings.Contains(string(taskBody), "make it pass") {
+		t.Errorf("task.md content = %q, want it to contain the --task body", string(taskBody))
+	}
 }
 
 func TestRunRun_FallbackBackend(t *testing.T) {

@@ -283,6 +283,10 @@ func RunRun(opts RunOptions) error {
 		_ = bk.Destroy(envID)
 		return fmt.Errorf("ai-env run: create run directory: %w", err)
 	}
+	if writeErr := run.WriteTask(aiEnvDir, runID, opts.Task); writeErr != nil {
+		_ = bk.Destroy(envID)
+		return fmt.Errorf("ai-env run: %w", writeErr)
+	}
 
 	var linkedPrev *string
 	if opts.Continue {
@@ -329,8 +333,17 @@ func RunRun(opts RunOptions) error {
 	}
 
 	if opts.ShellShim {
+		policyPath := filepath.Join(aiEnvDir, "policy.yaml")
+		if _, statErr := os.Stat(policyPath); statErr != nil {
+			_ = bk.Destroy(envID)
+			if os.IsNotExist(statErr) {
+				return fmt.Errorf("ai-env run: --shell-shim requires %s; run `ai-env policy init` first", policyPath)
+			}
+			return fmt.Errorf("ai-env run: stat %s: %w", policyPath, statErr)
+		}
 		superOpts.ShellShim = true
 		superOpts.ShellShimDir = filepath.Join(runDir.Path, "shim")
+		superOpts.PolicyEnginePath = policyPath
 		if mkErr := os.MkdirAll(superOpts.ShellShimDir, 0o755); mkErr != nil {
 			_ = bk.Destroy(envID)
 			return fmt.Errorf("ai-env run: create shim dir: %w", mkErr)

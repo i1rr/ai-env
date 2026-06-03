@@ -70,8 +70,8 @@ ai-env policy init                    # write a conservative default policy.yaml
 ai-env agents doctor                  # confirm the agent CLI is installed and credentialed
 ai-env mcp list                       # confirm the MCP registry shape (if you use MCP)
 
-# Once `ai-env run` is wired (later plan), the supervised run will look like:
-# ai-env run demo --agent claude --task "fix the failing tests"
+# Supervised run.
+ai-env run demo --agent claude --task "fix the failing tests"
 
 # Review the result
 ai-env status demo                    # current/last run state
@@ -308,8 +308,7 @@ stale tmp does not show in the operator view.
 start a continuation run that inherits the previous run's task:
 
 ```sh
-# Once `ai-env run` is wired (later plan):
-# ai-env run demo --continue
+ai-env run demo --continue
 ```
 
 Continuation rules:

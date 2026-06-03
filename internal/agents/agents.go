@@ -270,6 +270,15 @@ const (
 	// enters the agent process environment.
 	CredentialModeBackendManaged = "backend_managed"
 
+	// CredentialModeBrokered indicates an external broker (Anthropic
+	// console session, cloud identity provider, etc.) supplies the
+	// credential. Today the runtime treats this as a synonym for
+	// backend_managed: selection requires env.BackendManaged because
+	// no broker integration is wired into the launcher yet. Listing it
+	// in agents.yaml keeps the doctor PASS for the default scaffold and
+	// the runtime resolver consistent with that verdict.
+	CredentialModeBrokered = "brokered"
+
 	// CredentialModeProviderProxy points the agent at a host-side
 	// provider-compatible proxy. The raw token stays on the host; the
 	// sandbox only sees the proxy URL.
@@ -694,6 +703,12 @@ type CredentialResolution struct {
 //
 //   - backend_managed selects when env.BackendManaged is true. This is
 //     the "verify backend supports it" check.
+//   - brokered selects under the same condition as backend_managed
+//     (env.BackendManaged): no agent launcher consumes a broker token
+//     today, so treating brokered as "backend brokers it" keeps the
+//     default scaffold (Default: "brokered") runnable. Switch to the
+//     dedicated broker path once a launcher actually injects a
+//     short-lived token.
 //   - provider_proxy selects only when both the agent supports a
 //     custom base URL (env.AgentSupportsCustomBaseURL) and a proxy
 //     URL is configured (env.ProviderProxyURL). The plan calls the
@@ -725,6 +740,21 @@ func ResolveCredentialModeDetailed(contract config.AgentCredentialMode, env Envi
 			}
 			considered = append(considered, CredentialModeAttempt{
 				Mode: m, Reason: "backend does not advertise managed credentials",
+			})
+
+		case CredentialModeBrokered:
+			if env.BackendManaged {
+				considered = append(considered, CredentialModeAttempt{
+					Mode: m, OK: true, Reason: "selected: brokered credential delivered via backend",
+				})
+				return CredentialResolution{
+					Mode:        m,
+					InjectedEnv: nil,
+					Considered:  considered,
+				}, nil
+			}
+			considered = append(considered, CredentialModeAttempt{
+				Mode: m, Reason: "no broker integration wired; backend does not advertise managed credentials",
 			})
 
 		case CredentialModeProviderProxy:

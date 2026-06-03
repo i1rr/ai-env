@@ -240,6 +240,19 @@ Opens a brokered draft pull request for an env. The export gate is evaluated fir
 - When the gate allows but no broker is configured, the command falls back to a preview-only verdict (per-file summary, any warnings, and a `note: broker not configured; PR push skipped (gate verdict only)` line) so an operator on a workstation without a GitHub App or PAT can still inspect the gate decision locally.
 - Every gate verdict and every broker-lifecycle stage outcome (`broker_prepare`, `broker_acquire_token`, `broker_push_branch`, `broker_scan_metadata`, `broker_create_pr`, `broker_revoke_token`) is appended to `.ai-env/runs/<run-id>/policy-decisions.jsonl` as a single-line JSON record. The on-disk file is the audit trail for "why did this run not produce a PR" and survives across processes; see "Policy decisions" below.
 
+### `ai-env run <env-name> --task "..." [--agent <name>] [--continue] [--shell-shim] [--observer-mode auto|strict|disabled]`
+
+The supervised launch entry point. Walks upward from the current directory to find the project's `.ai-env/`, loads `ai-env.yaml`, locates the workspace at `.ai-env/workspaces/<env-name>/`, assembles the per-run primitives (multi-provider `ProviderProxy` from `secrets.local.yaml`, optional `GitHubBroker` health check, per-run JSON-RPC control socket, the configured sandbox backend with `sandbox.fallback_backend` failover, the agent launcher selected from `agents.yaml`), and drives the supervisor through the canonical pre-launch and teardown sequence.
+
+- `<env-name>`: required. Names the workspace under `.ai-env/workspaces/<env-name>/` (created by `ai-env new`).
+- `--task "<body>"`: required. The verbatim prompt body forwarded to the agent on stdin and recorded in `<run-dir>/task.md`.
+- `--agent <name>`: optional. Defaults to `project.default_agent` in `ai-env.yaml`. Must be present in `agents.yaml`.
+- `--continue`: optional. When the env has a previous run, links the new run to it via `run.json.linked_previous_run`. The supervisor's continuation gate still enforces which terminal states permit continuation (`killed_by_user`, `timed_out`, `killed_idle`).
+- `--shell-shim`: optional. Enables the experimental shell-shim prototype (Plan 08). Requires `.ai-env/policy.yaml` to exist; if it is missing, the command fails with a clear message pointing at `ai-env policy init`.
+- `--observer-mode auto|strict|disabled`: optional, default `auto`. Controls the egress observer's degradation policy.
+
+When the primary `sandbox.backend` is unavailable but `sandbox.fallback_backend` is set, the fallback is used and a `notice:` is printed to stderr. The command exits 0 only when the supervisor reaches `StateCompleted`; any other terminal state maps to a non-zero exit so shell pipelines and CI can detect failures.
+
 ### `ai-env status <env-name>`
 
 Prints a one-shot, human-readable snapshot of an env's most recent run. Locates `.ai-env/` by walking upward from the current directory (same lookup as `list`/`diff`/`patch`), reads the latest run's `run.json` and the tail of its `lifecycle.jsonl`, and prints:
@@ -734,7 +747,7 @@ To customize, set `filesystem.protected_paths` in `policy.yaml`. An explicitly e
 ai-env/
   cmd/ai-env/                 # CLI entry point (Cobra wiring)
   internal/cli/               # Command implementations (RunNew, RunList, RunDiff, RunPatch,
-                              # RunPR, RunScan, RunStatus, RunLogs, RunReport,
+                              # RunPR, RunScan, RunStatus, RunLogs, RunReport, RunRun,
                               # RunAgentsList/Doctor/Probe, ai-env mcp list/add/pin/
                               # scan/remove plus mcp_logger.go bridge to mcp-calls.jsonl)
   internal/config/            # Config structs, YAML loader, validators
@@ -790,8 +803,7 @@ ai-env/
   internal/testharness/       # Shared in-process test harness for run/backend/
                               # supervisor tests (plan 10)
   .github/workflows/          # CI pipeline
-  plan.md                     # Current plan in progress
-  plans/                      # Historical planning artifacts
+  docs/plans/                 # Active implementation plans (one .md per dated change)
   archive/                    # Archived plans (informational)
 ```
 
