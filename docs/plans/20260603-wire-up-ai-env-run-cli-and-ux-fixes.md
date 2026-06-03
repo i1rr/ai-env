@@ -52,10 +52,10 @@
 - Modify: `internal/cli/list.go`
 - Modify: `internal/cli/list_test.go`
 
-- [ ] В `readWorkspaceEntry` (`list.go` ~ строка 230) при отсутствии `ai-env.yaml` читать `.env-meta.json` через `workspace.MetadataPath(aiEnvDir, envName)` или прямой `filepath.Join(dir, ".env-meta.json")`. Заполнить `Strategy` и `Template` из metadata; убрать ложный warning `workspace has no ai-env.yaml` когда meta-файл присутствует.
-- [ ] Если оба файла отсутствуют, warning остаётся (но текст переформулировать: «no ai-env.yaml or .env-meta.json»).
-- [ ] Добавить test-case в `list_test.go`: workspace-каталог с только `.env-meta.json` (без `ai-env.yaml`), таблица показывает реальную стратегию и шаблон, warning не печатается.
-- [ ] `go test -race ./internal/cli/...`, должен проходить.
+- [x] В `readWorkspaceEntry` (`list.go` ~ строка 230) при отсутствии `ai-env.yaml` читать `.env-meta.json` через `workspace.MetadataPath(aiEnvDir, envName)` или прямой `filepath.Join(dir, ".env-meta.json")`. Заполнить `Strategy` и `Template` из metadata; убрать ложный warning `workspace has no ai-env.yaml` когда meta-файл присутствует.
+- [x] Если оба файла отсутствуют, warning остаётся (но текст переформулировать: «no ai-env.yaml or .env-meta.json»).
+- [x] Добавить test-case в `list_test.go`: workspace-каталог с только `.env-meta.json` (без `ai-env.yaml`), таблица показывает реальную стратегию и шаблон, warning не печатается.
+- [x] `go test -race ./internal/cli/...`, должен проходить.
 
 ### Task 3: Clean up plans/README.md
 

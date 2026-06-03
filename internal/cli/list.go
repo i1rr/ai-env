@@ -12,6 +12,7 @@ import (
 
 	"github.com/i1rr/ai-env/internal/config"
 	"github.com/i1rr/ai-env/internal/run"
+	"github.com/i1rr/ai-env/internal/workspace"
 )
 
 // ListOptions captures inputs for `ai-env list`. The list command takes no
@@ -85,7 +86,7 @@ func RunList(opts ListOptions) error {
 	}
 
 	workspacesDir := filepath.Join(aiEnvDir, "workspaces")
-	entries, warnings := scanWorkspaces(workspacesDir)
+	entries, warnings := scanWorkspaces(aiEnvDir, workspacesDir)
 
 	// Annotate every entry with its latest run state. We do the runs
 	// scan once for the whole listing rather than per workspace so an
@@ -182,7 +183,7 @@ func findAIEnvDir(start string) (string, error) {
 // into an envEntry. Returns entries sorted by name plus a list of
 // human-readable warnings for malformed workspaces (the listing still
 // includes those workspaces with placeholder fields, so users can see them).
-func scanWorkspaces(workspacesDir string) ([]envEntry, []string) {
+func scanWorkspaces(aiEnvDir, workspacesDir string) ([]envEntry, []string) {
 	var entries []envEntry
 	var warnings []string
 
@@ -209,7 +210,7 @@ func scanWorkspaces(workspacesDir string) ([]envEntry, []string) {
 			continue
 		}
 		dir := filepath.Join(workspacesDir, de.Name())
-		entry, warn := readWorkspaceEntry(dir)
+		entry, warn := readWorkspaceEntry(aiEnvDir, dir)
 		if warn != "" {
 			warnings = append(warnings, warn)
 		}
@@ -223,11 +224,14 @@ func scanWorkspaces(workspacesDir string) ([]envEntry, []string) {
 }
 
 // readWorkspaceEntry derives an envEntry from a single workspace directory.
-// Metadata is read on a best-effort basis: if ai-env.yaml is missing or
-// malformed the entry still appears in the listing with "unknown" fields and
-// a warning is returned alongside it. The directory name is always used as
-// a fallback for the env name so the user never sees a blank row.
-func readWorkspaceEntry(dir string) (envEntry, string) {
+// Metadata is read on a best-effort basis: ai-env.yaml is preferred, but
+// when it is missing the workspace's `.env-meta.json` is consulted instead
+// (that file is what `ai-env new` actually writes for every workspace, so
+// most real workspaces have it). The directory name is always used as a
+// fallback for the env name so the user never sees a blank row. A warning
+// is only returned when neither file is available, since that genuinely
+// means the row is incomplete.
+func readWorkspaceEntry(aiEnvDir, dir string) (envEntry, string) {
 	entry := envEntry{
 		Name:     filepath.Base(dir),
 		Strategy: "unknown",
@@ -236,28 +240,48 @@ func readWorkspaceEntry(dir string) (envEntry, string) {
 	}
 
 	cfgPath := filepath.Join(dir, "ai-env.yaml")
-	if _, err := os.Stat(cfgPath); err != nil {
-		// No metadata stub: the workspace exists on disk but has not yet
-		// been initialized with an ai-env.yaml. Surface it as a warning so
-		// the user knows this row is incomplete, but still list the dir.
-		if os.IsNotExist(err) {
-			return entry, fmt.Sprintf("workspace %s has no ai-env.yaml; showing directory name only", dir)
+	if _, err := os.Stat(cfgPath); err == nil {
+		cfg, loadErr := config.LoadAIEnv(cfgPath)
+		if loadErr != nil {
+			return entry, fmt.Sprintf("workspace %s: %v", dir, loadErr)
 		}
+		if cfg.Project.Name != "" {
+			entry.Name = cfg.Project.Name
+		}
+		if cfg.Workspace.Strategy != "" {
+			entry.Strategy = cfg.Workspace.Strategy
+		}
+		if cfg.Sandbox.Template != "" {
+			entry.Template = cfg.Sandbox.Template
+		}
+		return entry, ""
+	} else if !os.IsNotExist(err) {
 		return entry, fmt.Sprintf("workspace %s: stat ai-env.yaml: %v", dir, err)
 	}
 
-	cfg, err := config.LoadAIEnv(cfgPath)
+	// ai-env.yaml is absent. Fall back to .env-meta.json, the canonical
+	// per-workspace stub written by `ai-env new`. Reading it through the
+	// workspace package keeps the on-disk schema centralised.
+	metaPath := filepath.Join(dir, ".env-meta.json")
+	if _, err := os.Stat(metaPath); err != nil {
+		if os.IsNotExist(err) {
+			return entry, fmt.Sprintf("workspace %s has no ai-env.yaml or .env-meta.json; showing directory name only", dir)
+		}
+		return entry, fmt.Sprintf("workspace %s: stat .env-meta.json: %v", dir, err)
+	}
+
+	info, err := workspace.ReadMetadata(aiEnvDir, filepath.Base(dir))
 	if err != nil {
 		return entry, fmt.Sprintf("workspace %s: %v", dir, err)
 	}
-	if cfg.Project.Name != "" {
-		entry.Name = cfg.Project.Name
+	if info.Name != "" {
+		entry.Name = info.Name
 	}
-	if cfg.Workspace.Strategy != "" {
-		entry.Strategy = cfg.Workspace.Strategy
+	if s := string(info.Strategy); s != "" {
+		entry.Strategy = s
 	}
-	if cfg.Sandbox.Template != "" {
-		entry.Template = cfg.Sandbox.Template
+	if info.Template != "" {
+		entry.Template = info.Template
 	}
 	// LastRun is intentionally left empty here. RunList annotates each
 	// entry from the .ai-env/runs/ tree after scanWorkspaces returns so
