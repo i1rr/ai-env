@@ -74,7 +74,7 @@ func TestMCPCallsWriter_AppendsValidJSONL(t *testing.T) {
 			Decision: MCPCallDecisionWarn,
 			Reason:   "server \"github\" policy is warn (tool \"create_issue\")",
 			Tool:     "create_issue",
-			Repo:     "rivan1986/ai-env",
+			Repo:     "i1rr/ai-env",
 		},
 	}
 

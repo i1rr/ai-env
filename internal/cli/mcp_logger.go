@@ -31,8 +31,8 @@ package cli
 import (
 	"errors"
 
-	"github.com/rivan1986/ai-env/internal/mcp"
-	"github.com/rivan1986/ai-env/internal/run"
+	"github.com/i1rr/ai-env/internal/mcp"
+	"github.com/i1rr/ai-env/internal/run"
 )
 
 // MCPCallLogger is the bridge that satisfies internal/mcp.CallLogger

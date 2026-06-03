@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rivan1986/ai-env/internal/scanners"
+	"github.com/i1rr/ai-env/internal/scanners"
 )
 
 // TestMCPScrubber_ScrubChunkRedactsWholeKey verifies that a

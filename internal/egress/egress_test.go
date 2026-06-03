@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rivan1986/ai-env/internal/capability"
+	"github.com/i1rr/ai-env/internal/capability"
 )
 
 // TestEgressObserverMode_ConstantTokens pins the exact on-wire tokens

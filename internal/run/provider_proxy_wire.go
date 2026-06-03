@@ -38,7 +38,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/rivan1986/ai-env/internal/secrets"
+	"github.com/i1rr/ai-env/internal/secrets"
 )
 
 // startProviderProxies starts each proxy in opts.ProviderProxies in

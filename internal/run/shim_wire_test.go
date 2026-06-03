@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rivan1986/ai-env/internal/policy"
+	"github.com/i1rr/ai-env/internal/policy"
 )
 
 // TestInjectShimPath_PrependsToExistingPath asserts the helper rewrites a

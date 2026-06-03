@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rivan1986/ai-env/internal/config"
+	"github.com/i1rr/ai-env/internal/config"
 )
 
 // recordingRunner is a test ExecRunner that captures every call so the

@@ -34,7 +34,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/rivan1986/ai-env/internal/backend"
+	"github.com/i1rr/ai-env/internal/backend"
 )
 
 // Name is the backend identifier surfaced through BackendStatus and the

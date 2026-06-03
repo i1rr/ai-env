@@ -39,8 +39,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/rivan1986/ai-env/internal/backend"
-	"github.com/rivan1986/ai-env/internal/config"
+	"github.com/i1rr/ai-env/internal/backend"
+	"github.com/i1rr/ai-env/internal/config"
 )
 
 // Launcher is the contract every agent launcher satisfies. The

@@ -55,9 +55,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rivan1986/ai-env/internal/export"
-	"github.com/rivan1986/ai-env/internal/githubbroker"
-	"github.com/rivan1986/ai-env/internal/workspace"
+	"github.com/i1rr/ai-env/internal/export"
+	"github.com/i1rr/ai-env/internal/githubbroker"
+	"github.com/i1rr/ai-env/internal/workspace"
 )
 
 // TestAcceptance_WorkflowFileBlocksBrokeredPR implements plan.md line

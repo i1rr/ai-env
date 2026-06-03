@@ -51,7 +51,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rivan1986/ai-env/internal/network"
+	"github.com/i1rr/ai-env/internal/network"
 )
 
 // applyNetworkPolicyTimeout caps the `sbx network apply` invocation. It

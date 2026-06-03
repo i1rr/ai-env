@@ -6,7 +6,7 @@ import (
 	"io"
 	"os"
 
-	"github.com/rivan1986/ai-env/internal/workspace"
+	"github.com/i1rr/ai-env/internal/workspace"
 )
 
 // DestroyOptions captures the parsed flags + positional argument for

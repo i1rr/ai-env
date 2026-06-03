@@ -54,8 +54,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rivan1986/ai-env/internal/backend"
-	"github.com/rivan1986/ai-env/internal/run"
+	"github.com/i1rr/ai-env/internal/backend"
+	"github.com/i1rr/ai-env/internal/run"
 )
 
 // Compile-time check that the in-memory RecordingBackendEventSink

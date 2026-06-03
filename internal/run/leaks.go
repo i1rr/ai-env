@@ -48,7 +48,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/rivan1986/ai-env/internal/secrets"
+	"github.com/i1rr/ai-env/internal/secrets"
 )
 
 // leaksFileName is the basename of the per-run unified leaks ledger.

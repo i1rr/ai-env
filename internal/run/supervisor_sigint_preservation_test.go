@@ -37,7 +37,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rivan1986/ai-env/internal/workspace"
+	"github.com/i1rr/ai-env/internal/workspace"
 )
 
 // initSigintFixtureRepo builds a real Git repo with a single tracked

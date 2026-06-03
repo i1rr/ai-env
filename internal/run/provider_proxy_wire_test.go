@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rivan1986/ai-env/internal/secrets"
+	"github.com/i1rr/ai-env/internal/secrets"
 )
 
 // readLifecycleVerbs parses lifecycle.jsonl and returns the lifecycle

@@ -25,9 +25,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/rivan1986/ai-env/internal/config"
-	"github.com/rivan1986/ai-env/internal/run"
-	"github.com/rivan1986/ai-env/internal/workspace"
+	"github.com/i1rr/ai-env/internal/config"
+	"github.com/i1rr/ai-env/internal/run"
+	"github.com/i1rr/ai-env/internal/workspace"
 )
 
 // defaultLargeDiffLines is the line-count threshold above which the

@@ -57,8 +57,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/rivan1986/ai-env/internal/config"
-	"github.com/rivan1986/ai-env/internal/policy"
+	"github.com/i1rr/ai-env/internal/config"
+	"github.com/i1rr/ai-env/internal/policy"
 )
 
 // PolicyEngine is the minimal surface the supervisor consults when it

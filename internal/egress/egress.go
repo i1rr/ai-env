@@ -55,7 +55,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/rivan1986/ai-env/internal/capability"
+	"github.com/i1rr/ai-env/internal/capability"
 )
 
 // EgressObserverMode is the operator-configured policy that decides

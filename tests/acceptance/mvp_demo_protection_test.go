@@ -46,8 +46,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rivan1986/ai-env/internal/githubbroker"
-	"github.com/rivan1986/ai-env/internal/run"
+	"github.com/i1rr/ai-env/internal/githubbroker"
+	"github.com/i1rr/ai-env/internal/run"
 )
 
 // TestAcceptance_PushToMainDenied implements plan.md line 99 (master

@@ -51,7 +51,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rivan1986/ai-env/internal/secrets"
+	"github.com/i1rr/ai-env/internal/secrets"
 )
 
 // BuildBrokerOptions bundles the per-broker policy / transport inputs

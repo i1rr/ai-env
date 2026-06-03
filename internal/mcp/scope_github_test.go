@@ -248,7 +248,7 @@ func TestGitHubScopeEnforcer_GatewayIntegration_PlugsInAsScopeEnforcer(t *testin
 	// suite uses Policy: warn, so an allowed call surfaces as Warn
 	// rather than Allow; that lets us assert both that the scope
 	// passed and that the per-server policy still applied.
-	e := mustGHEnforcer(t, "rivan1986/ai-env")
+	e := mustGHEnforcer(t, "i1rr/ai-env")
 	logger := &recordingLogger{}
 	gw := newTestGateway(t, logger, map[string]ScopeEnforcer{
 		ScopeKindGitHub: e,
@@ -258,7 +258,7 @@ func TestGitHubScopeEnforcer_GatewayIntegration_PlugsInAsScopeEnforcer(t *testin
 	dec, err := gw.AuthorizeCall(CallRequest{
 		Server:    "github",
 		Tool:      "list_issues",
-		Repo:      "rivan1986/ai-env",
+		Repo:      "i1rr/ai-env",
 		Operation: GitHubOperationRead,
 	})
 	if err != nil {

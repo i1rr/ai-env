@@ -7,7 +7,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/rivan1986/ai-env/internal/run"
+	"github.com/i1rr/ai-env/internal/run"
 )
 
 // LogStream is the enum LogsOptions.Stream accepts. The plan asks for

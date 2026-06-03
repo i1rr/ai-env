@@ -3,8 +3,8 @@ package export
 import (
 	"testing"
 
-	"github.com/rivan1986/ai-env/internal/scanners"
-	"github.com/rivan1986/ai-env/internal/workspace"
+	"github.com/i1rr/ai-env/internal/scanners"
+	"github.com/i1rr/ai-env/internal/workspace"
 )
 
 // TestExportGate_SecretFindingsBlock pins plan 06 step 12: a

@@ -58,8 +58,8 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/rivan1986/ai-env/internal/egress"
-	"github.com/rivan1986/ai-env/internal/egress/rules"
+	"github.com/i1rr/ai-env/internal/egress"
+	"github.com/i1rr/ai-env/internal/egress/rules"
 )
 
 // startControlSocket performs canonical pre-launch step 2.

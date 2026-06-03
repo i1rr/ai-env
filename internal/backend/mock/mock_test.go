@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rivan1986/ai-env/internal/backend"
+	"github.com/i1rr/ai-env/internal/backend"
 )
 
 func newFixedTime() func() time.Time {

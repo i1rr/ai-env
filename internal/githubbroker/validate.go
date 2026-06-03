@@ -33,7 +33,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/rivan1986/ai-env/internal/workspace"
+	"github.com/i1rr/ai-env/internal/workspace"
 )
 
 // BranchPrefix is the only branch prefix the broker accepts. Plan 07

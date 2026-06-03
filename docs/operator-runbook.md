@@ -27,7 +27,7 @@ Read it alongside:
 
 ```sh
 # Go 1.22 or newer is required (see go.mod).
-go install github.com/rivan1986/ai-env/cmd/ai-env@latest
+go install github.com/i1rr/ai-env/cmd/ai-env@latest
 ```
 
 The binary lands in `$(go env GOBIN)` or `$(go env GOPATH)/bin`. Put
@@ -38,7 +38,7 @@ directory.
 ### Local build (development)
 
 ```sh
-git clone https://github.com/rivan1986/ai-env.git
+git clone https://github.com/i1rr/ai-env.git
 cd ai-env
 go build -o ai-env ./cmd/ai-env
 ./ai-env --help

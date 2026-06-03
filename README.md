@@ -8,7 +8,7 @@ Build the binary, scaffold an environment for the current project, look at what 
 
 ```sh
 # 1. Build (Go 1.25+ required; see go.mod)
-go install github.com/rivan1986/ai-env/cmd/ai-env@latest
+go install github.com/i1rr/ai-env/cmd/ai-env@latest
 
 # 2. From inside your project repo, create an environment named "demo"
 cd path/to/your/project
@@ -37,7 +37,7 @@ The `.ai-env/` directory holds every environment's workspace, configs, policy, a
 ### From source (recommended)
 
 ```sh
-go install github.com/rivan1986/ai-env/cmd/ai-env@latest
+go install github.com/i1rr/ai-env/cmd/ai-env@latest
 ```
 
 The binary lands in `$(go env GOBIN)` or `$(go env GOPATH)/bin`. Add that directory to your `PATH` if it is not there already.
@@ -45,7 +45,7 @@ The binary lands in `$(go env GOBIN)` or `$(go env GOPATH)/bin`. Add that direct
 ### Local build (development)
 
 ```sh
-git clone https://github.com/rivan1986/ai-env.git
+git clone https://github.com/i1rr/ai-env.git
 cd ai-env
 go build -o ai-env ./cmd/ai-env
 ./ai-env --help
@@ -145,7 +145,7 @@ Plans 01, 02, 03, 04, 05, 06, 07, 08, 09, and 10 complete. The CLI builds and ru
 ### From source (recommended for now)
 
 ```sh
-go install github.com/rivan1986/ai-env/cmd/ai-env@latest
+go install github.com/i1rr/ai-env/cmd/ai-env@latest
 ```
 
 The binary lands in `$(go env GOBIN)` or `$(go env GOPATH)/bin`.
@@ -153,7 +153,7 @@ The binary lands in `$(go env GOBIN)` or `$(go env GOPATH)/bin`.
 ### Local build
 
 ```sh
-git clone https://github.com/rivan1986/ai-env.git
+git clone https://github.com/i1rr/ai-env.git
 cd ai-env
 go build -o ai-env ./cmd/ai-env
 ./ai-env --help

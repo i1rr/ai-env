@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rivan1986/ai-env/internal/capability"
-	"github.com/rivan1986/ai-env/internal/run"
+	"github.com/i1rr/ai-env/internal/capability"
+	"github.com/i1rr/ai-env/internal/run"
 )
 
 // fakeLookPath returns a deterministic LookPath substitute. Binaries

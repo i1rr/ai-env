@@ -30,7 +30,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rivan1986/ai-env/internal/workspace"
+	"github.com/i1rr/ai-env/internal/workspace"
 )
 
 // integrationGitRepo creates a temp directory, runs `git init` inside it,

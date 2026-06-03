@@ -41,7 +41,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/rivan1986/ai-env/internal/scanners"
+	"github.com/i1rr/ai-env/internal/scanners"
 )
 
 // MetadataScanner is the narrow contract ScanMetadata depends on. A

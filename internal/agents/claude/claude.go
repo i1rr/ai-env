@@ -20,9 +20,9 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/rivan1986/ai-env/internal/agents"
-	"github.com/rivan1986/ai-env/internal/backend"
-	"github.com/rivan1986/ai-env/internal/config"
+	"github.com/i1rr/ai-env/internal/agents"
+	"github.com/i1rr/ai-env/internal/backend"
+	"github.com/i1rr/ai-env/internal/config"
 )
 
 // Name is the agent identifier surfaced through Launcher.Name and

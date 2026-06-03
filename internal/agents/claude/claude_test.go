@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rivan1986/ai-env/internal/agents"
-	"github.com/rivan1986/ai-env/internal/config"
+	"github.com/i1rr/ai-env/internal/agents"
+	"github.com/i1rr/ai-env/internal/config"
 )
 
 // claudeHelpFixture is a plausible subset of `claude --help` output.

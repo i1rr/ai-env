@@ -8,11 +8,11 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/rivan1986/ai-env/internal/config"
-	"github.com/rivan1986/ai-env/internal/export"
-	"github.com/rivan1986/ai-env/internal/run"
-	"github.com/rivan1986/ai-env/internal/scanners"
-	"github.com/rivan1986/ai-env/internal/workspace"
+	"github.com/i1rr/ai-env/internal/config"
+	"github.com/i1rr/ai-env/internal/export"
+	"github.com/i1rr/ai-env/internal/run"
+	"github.com/i1rr/ai-env/internal/scanners"
+	"github.com/i1rr/ai-env/internal/workspace"
 )
 
 // exportInputs bundles everything an export surface needs to construct

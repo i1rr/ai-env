@@ -49,7 +49,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/rivan1986/ai-env/internal/mcp"
+	"github.com/i1rr/ai-env/internal/mcp"
 )
 
 // mcpFileName is the basename of the project's MCP registry document.

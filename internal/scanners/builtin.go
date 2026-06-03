@@ -40,7 +40,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rivan1986/ai-env/internal/workspace"
+	"github.com/i1rr/ai-env/internal/workspace"
 )
 
 // scannerNameBuiltIn is the Scanner identifier the built-in scanner

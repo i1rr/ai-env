@@ -37,7 +37,7 @@ import (
 	"strings"
 	"text/tabwriter"
 
-	"github.com/rivan1986/ai-env/internal/run"
+	"github.com/i1rr/ai-env/internal/run"
 )
 
 // LeaksFormat enumerates the output format `ai-env leaks` supports.

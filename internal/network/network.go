@@ -55,8 +55,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/rivan1986/ai-env/internal/backend"
-	"github.com/rivan1986/ai-env/internal/config"
+	"github.com/i1rr/ai-env/internal/backend"
+	"github.com/i1rr/ai-env/internal/config"
 )
 
 // DefaultPolicy is the literal string "deny": the only outbound default

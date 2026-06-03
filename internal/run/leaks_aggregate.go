@@ -56,7 +56,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/rivan1986/ai-env/internal/scanners"
+	"github.com/i1rr/ai-env/internal/scanners"
 )
 
 // AggregateLeaksOptions bundles the per-run metadata AggregateLeaks

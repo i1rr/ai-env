@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rivan1986/ai-env/internal/mcp"
+	"github.com/i1rr/ai-env/internal/mcp"
 )
 
 // scaffoldProjectForMCP creates a fresh project scaffold via RunNew so

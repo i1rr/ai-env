@@ -25,8 +25,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rivan1986/ai-env/internal/config"
-	"github.com/rivan1986/ai-env/internal/secrets"
+	"github.com/i1rr/ai-env/internal/config"
+	"github.com/i1rr/ai-env/internal/secrets"
 )
 
 // startTestProxy spins up a real ProviderProxy on a loopback port and

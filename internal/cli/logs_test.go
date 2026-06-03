@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rivan1986/ai-env/internal/run"
+	"github.com/i1rr/ai-env/internal/run"
 )
 
 // scaffoldRunWithLogs creates a project with one run.json plus

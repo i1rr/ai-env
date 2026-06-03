@@ -12,10 +12,10 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/rivan1986/ai-env/internal/agents"
-	"github.com/rivan1986/ai-env/internal/agents/claude"
-	"github.com/rivan1986/ai-env/internal/agents/codex"
-	"github.com/rivan1986/ai-env/internal/config"
+	"github.com/i1rr/ai-env/internal/agents"
+	"github.com/i1rr/ai-env/internal/agents/claude"
+	"github.com/i1rr/ai-env/internal/agents/codex"
+	"github.com/i1rr/ai-env/internal/config"
 )
 
 // agentsProbeTimeout caps how long a single agent probe (version or

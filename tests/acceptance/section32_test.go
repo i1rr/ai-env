@@ -58,17 +58,17 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rivan1986/ai-env/internal/agents"
-	"github.com/rivan1986/ai-env/internal/backend"
-	"github.com/rivan1986/ai-env/internal/backend/docker_sbx"
-	"github.com/rivan1986/ai-env/internal/backend/mock"
-	"github.com/rivan1986/ai-env/internal/config"
-	"github.com/rivan1986/ai-env/internal/export"
-	"github.com/rivan1986/ai-env/internal/network"
-	"github.com/rivan1986/ai-env/internal/run"
-	"github.com/rivan1986/ai-env/internal/scanners"
-	"github.com/rivan1986/ai-env/internal/secrets"
-	"github.com/rivan1986/ai-env/internal/workspace"
+	"github.com/i1rr/ai-env/internal/agents"
+	"github.com/i1rr/ai-env/internal/backend"
+	"github.com/i1rr/ai-env/internal/backend/docker_sbx"
+	"github.com/i1rr/ai-env/internal/backend/mock"
+	"github.com/i1rr/ai-env/internal/config"
+	"github.com/i1rr/ai-env/internal/export"
+	"github.com/i1rr/ai-env/internal/network"
+	"github.com/i1rr/ai-env/internal/run"
+	"github.com/i1rr/ai-env/internal/scanners"
+	"github.com/i1rr/ai-env/internal/secrets"
+	"github.com/i1rr/ai-env/internal/workspace"
 )
 
 // acceptanceGateEnv is the env var name that arms the suite. The build

@@ -46,10 +46,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rivan1986/ai-env/internal/config"
-	"github.com/rivan1986/ai-env/internal/network"
-	"github.com/rivan1986/ai-env/internal/policy"
-	"github.com/rivan1986/ai-env/internal/run"
+	"github.com/i1rr/ai-env/internal/config"
+	"github.com/i1rr/ai-env/internal/network"
+	"github.com/i1rr/ai-env/internal/policy"
+	"github.com/i1rr/ai-env/internal/run"
 
 	"gopkg.in/yaml.v3"
 

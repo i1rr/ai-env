@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rivan1986/ai-env/internal/workspace"
+	"github.com/i1rr/ai-env/internal/workspace"
 )
 
 // timeNow returns a fixed deterministic timestamp the tests pass into the

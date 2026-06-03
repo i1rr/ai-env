@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rivan1986/ai-env/internal/config"
+	"github.com/i1rr/ai-env/internal/config"
 )
 
 // fixedClock returns a deterministic time so tests can assert on the

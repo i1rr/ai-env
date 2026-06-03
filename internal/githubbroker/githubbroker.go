@@ -68,7 +68,7 @@ import (
 	"errors"
 	"time"
 
-	"github.com/rivan1986/ai-env/internal/scanners"
+	"github.com/i1rr/ai-env/internal/scanners"
 )
 
 // GitHubBroker is the contract every broker implementation satisfies.

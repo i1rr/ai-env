@@ -13,12 +13,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/rivan1986/ai-env/internal/backend"
-	"github.com/rivan1986/ai-env/internal/egress"
-	"github.com/rivan1986/ai-env/internal/egress/rules"
-	"github.com/rivan1986/ai-env/internal/network"
-	"github.com/rivan1986/ai-env/internal/policy"
-	"github.com/rivan1986/ai-env/internal/secrets"
+	"github.com/i1rr/ai-env/internal/backend"
+	"github.com/i1rr/ai-env/internal/egress"
+	"github.com/i1rr/ai-env/internal/egress/rules"
+	"github.com/i1rr/ai-env/internal/network"
+	"github.com/i1rr/ai-env/internal/policy"
+	"github.com/i1rr/ai-env/internal/secrets"
 )
 
 // defaultStatsPollInterval is how often the supervisor's stats / idle /

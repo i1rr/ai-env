@@ -41,9 +41,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rivan1986/ai-env/internal/run"
-	"github.com/rivan1986/ai-env/internal/scanners"
-	"github.com/rivan1986/ai-env/internal/workspace"
+	"github.com/i1rr/ai-env/internal/run"
+	"github.com/i1rr/ai-env/internal/scanners"
+	"github.com/i1rr/ai-env/internal/workspace"
 )
 
 // acceptanceTokenLiteral is the synthetic raw secret used by every

@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rivan1986/ai-env/internal/mcp"
-	"github.com/rivan1986/ai-env/internal/run"
+	"github.com/i1rr/ai-env/internal/mcp"
+	"github.com/i1rr/ai-env/internal/run"
 )
 
 // TestMCPCallLogger_BridgesGatewayToFile is the end-to-end integration

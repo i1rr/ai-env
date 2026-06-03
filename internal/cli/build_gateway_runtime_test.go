@@ -26,8 +26,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rivan1986/ai-env/internal/mcp"
-	"github.com/rivan1986/ai-env/internal/run"
+	"github.com/i1rr/ai-env/internal/mcp"
+	"github.com/i1rr/ai-env/internal/run"
 )
 
 // TestMCPConfigGeneration_WrapsEachServer is the first Plan §3.2

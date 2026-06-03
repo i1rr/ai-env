@@ -28,7 +28,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rivan1986/ai-env/internal/egress"
+	"github.com/i1rr/ai-env/internal/egress"
 )
 
 // sequenceProbe is the recording fake the canonical-sequence tests

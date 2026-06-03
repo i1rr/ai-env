@@ -1,4 +1,4 @@
-module github.com/rivan1986/ai-env
+module github.com/i1rr/ai-env
 
 go 1.25
 

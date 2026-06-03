@@ -58,8 +58,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/rivan1986/ai-env/internal/run"
-	"github.com/rivan1986/ai-env/internal/scanners"
+	"github.com/i1rr/ai-env/internal/run"
+	"github.com/i1rr/ai-env/internal/scanners"
 )
 
 // mcpScrubberOverlap is the rolling-buffer overlap window in bytes.

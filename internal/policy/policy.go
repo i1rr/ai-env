@@ -61,7 +61,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/rivan1986/ai-env/internal/config"
+	"github.com/i1rr/ai-env/internal/config"
 )
 
 // Decision is the policy verdict for one Event. The five values mirror

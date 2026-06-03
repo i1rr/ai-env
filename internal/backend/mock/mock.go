@@ -15,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/rivan1986/ai-env/internal/backend"
+	"github.com/i1rr/ai-env/internal/backend"
 )
 
 // Backend is the in-memory no-op backend. It satisfies backend.Backend

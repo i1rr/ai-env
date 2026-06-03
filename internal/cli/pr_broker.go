@@ -54,11 +54,11 @@ import (
 	"fmt"
 	"path/filepath"
 
-	"github.com/rivan1986/ai-env/internal/config"
-	"github.com/rivan1986/ai-env/internal/githubbroker"
-	"github.com/rivan1986/ai-env/internal/scanners"
-	"github.com/rivan1986/ai-env/internal/secrets"
-	"github.com/rivan1986/ai-env/internal/workspace"
+	"github.com/i1rr/ai-env/internal/config"
+	"github.com/i1rr/ai-env/internal/githubbroker"
+	"github.com/i1rr/ai-env/internal/scanners"
+	"github.com/i1rr/ai-env/internal/secrets"
+	"github.com/i1rr/ai-env/internal/workspace"
 )
 
 // brokerSetup bundles the resolved broker plus the repository

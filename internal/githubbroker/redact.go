@@ -59,7 +59,7 @@ import (
 	"regexp"
 	"sync"
 
-	"github.com/rivan1986/ai-env/internal/secrets"
+	"github.com/i1rr/ai-env/internal/secrets"
 )
 
 // RedactedPlaceholder is the literal string token-like fragments are

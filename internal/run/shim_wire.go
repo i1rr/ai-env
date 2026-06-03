@@ -39,7 +39,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rivan1986/ai-env/internal/policy"
+	"github.com/i1rr/ai-env/internal/policy"
 )
 
 // shimPathEnvKey is the name of the PATH environment variable the

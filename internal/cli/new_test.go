@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rivan1986/ai-env/internal/config"
+	"github.com/i1rr/ai-env/internal/config"
 )
 
 // --- Step 7: scaffold generation -----------------------------------------

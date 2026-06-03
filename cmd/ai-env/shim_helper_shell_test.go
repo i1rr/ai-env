@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rivan1986/ai-env/internal/policy"
+	"github.com/i1rr/ai-env/internal/policy"
 )
 
 // TestCandidateScriptPath_FindsRegularFile verifies the

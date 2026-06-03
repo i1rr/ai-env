@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rivan1986/ai-env/internal/policy"
+	"github.com/i1rr/ai-env/internal/policy"
 )
 
 // TestIntegration_ShellShim_RealChildSeesShimDirFirstOnPath spawns a real

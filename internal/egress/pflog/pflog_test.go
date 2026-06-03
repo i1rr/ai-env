@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rivan1986/ai-env/internal/egress"
+	"github.com/i1rr/ai-env/internal/egress"
 )
 
 // TestNew_ValidatesRequiredFields pins the construction

@@ -36,7 +36,7 @@ package scanners
 import (
 	"time"
 
-	"github.com/rivan1986/ai-env/internal/workspace"
+	"github.com/i1rr/ai-env/internal/workspace"
 )
 
 // ScanRunner is the contract every scanner adapter satisfies. A single

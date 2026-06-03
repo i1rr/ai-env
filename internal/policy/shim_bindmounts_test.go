@@ -4,7 +4,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/rivan1986/ai-env/internal/backend"
+	"github.com/i1rr/ai-env/internal/backend"
 )
 
 // TestBuildShimBindMounts_DefaultsCoverEveryCanonicalPath is the

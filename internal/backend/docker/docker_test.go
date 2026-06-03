@@ -24,9 +24,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rivan1986/ai-env/internal/backend"
-	"github.com/rivan1986/ai-env/internal/config"
-	"github.com/rivan1986/ai-env/internal/network"
+	"github.com/i1rr/ai-env/internal/backend"
+	"github.com/i1rr/ai-env/internal/config"
+	"github.com/i1rr/ai-env/internal/network"
 )
 
 // fakeRunner is a Runner that records every invocation and replays

@@ -52,7 +52,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/rivan1986/ai-env/internal/backend"
+	"github.com/i1rr/ai-env/internal/backend"
 )
 
 // BuildShimBindMountsOptions bundles the per-call knobs

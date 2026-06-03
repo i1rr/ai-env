@@ -65,8 +65,8 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/rivan1986/ai-env/internal/capability"
-	"github.com/rivan1986/ai-env/internal/run"
+	"github.com/i1rr/ai-env/internal/capability"
+	"github.com/i1rr/ai-env/internal/run"
 )
 
 // doctorRuntimeProbeTimeout caps every external probe `ai-env doctor`

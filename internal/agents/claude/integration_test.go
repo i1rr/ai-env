@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rivan1986/ai-env/internal/agents"
+	"github.com/i1rr/ai-env/internal/agents"
 )
 
 // backendIntegrationGate is the env var the plan specifies. The

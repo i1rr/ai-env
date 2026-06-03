@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rivan1986/ai-env/internal/mcp"
-	"github.com/rivan1986/ai-env/internal/run"
+	"github.com/i1rr/ai-env/internal/mcp"
+	"github.com/i1rr/ai-env/internal/run"
 )
 
 // TestBuildRunGateway_RejectsMissingRequiredFields enforces the
@@ -65,7 +65,7 @@ func TestBuildRunGateway_HappyPath_WiresGatewayAndWriter(t *testing.T) {
 		RunID:         "20260601-120000-aaaaaa",
 		Registry:      registry,
 		WorkspaceRoot: workspace,
-		CurrentRepo:   "rivan1986/ai-env",
+		CurrentRepo:   "i1rr/ai-env",
 	})
 	if err != nil {
 		t.Fatalf("BuildRunGateway: %v", err)
@@ -321,7 +321,7 @@ func TestBuildRunGateway_DenyUnknownScope_NoEnforcer(t *testing.T) {
 	dec, _ := bundle.Gateway.AuthorizeCall(mcp.CallRequest{
 		Server: "github",
 		Tool:   "list_issues",
-		Repo:   "rivan1986/ai-env",
+		Repo:   "i1rr/ai-env",
 	})
 	if dec.Outcome != mcp.GatewayOutcomeBlock {
 		t.Fatalf("AuthorizeCall outcome = %v, want Block (no enforcer wired)", dec.Outcome)

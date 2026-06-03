@@ -17,9 +17,9 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/rivan1986/ai-env/internal/config"
-	"github.com/rivan1986/ai-env/internal/githubbroker"
-	"github.com/rivan1986/ai-env/internal/workspace"
+	"github.com/i1rr/ai-env/internal/config"
+	"github.com/i1rr/ai-env/internal/githubbroker"
+	"github.com/i1rr/ai-env/internal/workspace"
 )
 
 // NewOptions captures the parsed flags + positional argument for `ai-env new`.

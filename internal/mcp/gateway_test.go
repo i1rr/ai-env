@@ -536,7 +536,7 @@ func TestAuthorizeCall_WarnPolicyWarnsAfterScopeAllow(t *testing.T) {
 	dec, err := gw.AuthorizeCall(CallRequest{
 		Server:    "github",
 		Tool:      "list_issues",
-		Repo:      "rivan1986/ai-env",
+		Repo:      "i1rr/ai-env",
 		Operation: "read",
 	})
 	if err != nil {
@@ -545,7 +545,7 @@ func TestAuthorizeCall_WarnPolicyWarnsAfterScopeAllow(t *testing.T) {
 	if dec.Outcome != GatewayOutcomeWarn {
 		t.Fatalf("Outcome = %v, want Warn", dec.Outcome)
 	}
-	if len(gh.seen) != 1 || gh.seen[0].Repo != "rivan1986/ai-env" {
+	if len(gh.seen) != 1 || gh.seen[0].Repo != "i1rr/ai-env" {
 		t.Errorf("enforcer didn't see expected Repo, got %+v", gh.seen)
 	}
 }

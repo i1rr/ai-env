@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rivan1986/ai-env/internal/workspace"
+	"github.com/i1rr/ai-env/internal/workspace"
 )
 
 // TestBuiltIn_DetectsCommonFakeSecrets pins plan 06 step 10: the

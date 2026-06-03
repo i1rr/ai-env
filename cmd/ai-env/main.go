@@ -9,7 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/rivan1986/ai-env/internal/cli"
+	"github.com/i1rr/ai-env/internal/cli"
 )
 
 // version is set at build time via -ldflags.

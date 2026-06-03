@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rivan1986/ai-env/internal/run"
+	"github.com/i1rr/ai-env/internal/run"
 )
 
 // TestRunReport_NoRunsYet exercises the empty-state path: a freshly

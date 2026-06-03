@@ -42,7 +42,7 @@ import (
 	"encoding/hex"
 	"strings"
 
-	"github.com/rivan1986/ai-env/internal/scanners"
+	"github.com/i1rr/ai-env/internal/scanners"
 )
 
 // gatewaySecretSentinelf is the format string the request-direction

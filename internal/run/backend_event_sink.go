@@ -26,7 +26,7 @@ package run
 import (
 	"errors"
 
-	"github.com/rivan1986/ai-env/internal/backend"
+	"github.com/i1rr/ai-env/internal/backend"
 )
 
 // Compile-time check that LifecycleWriterBackendEventSink satisfies
