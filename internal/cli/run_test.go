@@ -167,6 +167,10 @@ func TestRunRun_HappyPath_MockBackend(t *testing.T) {
 	if rec.EnvName != "demo" {
 		t.Errorf("run.json env_name = %s, want demo", rec.EnvName)
 	}
+	if rec.ModelCredentialMode != run.ModelCredentialBackendManaged {
+		t.Errorf("run.json model_credential_mode = %q, want %q (plan.CredentialMode must propagate)",
+			rec.ModelCredentialMode, run.ModelCredentialBackendManaged)
+	}
 
 	taskBody, err := os.ReadFile(run.TaskPath(aiEnvDir, latest.ID))
 	if err != nil {
@@ -387,6 +391,25 @@ func TestRunRun_Continue_RejectsNoPreviousRun(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "no previous run") {
 		t.Errorf("expected error to mention no previous run, got %v", err)
+	}
+}
+
+// TestCredentialModeForRecord pins the agents → run-record mapping: the
+// brokered synonym must collapse to backend_managed so run.json never
+// carries an unknown literal, and the canonical modes must round-trip.
+func TestCredentialModeForRecord(t *testing.T) {
+	cases := map[string]run.ModelCredentialMode{
+		"":                                    run.ModelCredentialBackendManaged,
+		agents.CredentialModeBackendManaged:   run.ModelCredentialBackendManaged,
+		agents.CredentialModeBrokered:         run.ModelCredentialBackendManaged,
+		agents.CredentialModeProviderProxy:    run.ModelCredentialProviderProxy,
+		agents.CredentialModeRawEnvExplicit:   run.ModelCredentialRawEnvExplicit,
+		"unrecognized-future-mode":            run.ModelCredentialBackendManaged,
+	}
+	for in, want := range cases {
+		if got := credentialModeForRecord(in); got != want {
+			t.Errorf("credentialModeForRecord(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
 

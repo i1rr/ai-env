@@ -339,20 +339,22 @@ func RunRun(opts RunOptions) error {
 	}
 
 	superOpts := run.SupervisorOptions{
-		RunDir:             runDir.Path,
-		RunID:              runID,
-		EnvName:            opts.EnvName,
-		Task:               opts.Task,
-		Backend:            backendName,
-		Agent:              agentName,
-		Command:            run.CommandSpec(plan.Command),
-		BackendAdapter:     bk,
-		BackendEnvID:       envID,
-		Stdin:              strings.NewReader(plan.StdinBody),
-		ControlSocket:      cs,
-		EgressObserverMode: observerMode,
-		UserOutput:         opts.Stdout,
-		ProviderProxies:    proxyBuild.Proxies,
+		RunDir:              runDir.Path,
+		RunID:               runID,
+		EnvName:             opts.EnvName,
+		Task:                opts.Task,
+		Backend:             backendName,
+		Agent:               agentName,
+		Command:             run.CommandSpec(plan.Command),
+		BackendAdapter:      bk,
+		BackendEnvID:        envID,
+		Stdin:               strings.NewReader(plan.StdinBody),
+		ControlSocket:       cs,
+		EgressObserverMode:  observerMode,
+		UserOutput:          opts.Stdout,
+		ProviderProxies:     proxyBuild.Proxies,
+		WorkspaceMCPRoot:    wsPath,
+		ModelCredentialMode: credentialModeForRecord(plan.CredentialMode),
 		BackendStart: func() error {
 			_, err := bk.Start(envID)
 			return err
@@ -369,6 +371,7 @@ func RunRun(opts RunOptions) error {
 	if opts.ShellShim {
 		policyPath := filepath.Join(aiEnvDir, "policy.yaml")
 		if _, statErr := os.Stat(policyPath); statErr != nil {
+			_ = cs.Stop()
 			_ = bk.Destroy(envID)
 			_ = os.RemoveAll(runDir.Path)
 			if os.IsNotExist(statErr) {
@@ -380,6 +383,7 @@ func RunRun(opts RunOptions) error {
 		superOpts.ShellShimDir = filepath.Join(runDir.Path, "shim")
 		superOpts.PolicyEnginePath = policyPath
 		if mkErr := os.MkdirAll(superOpts.ShellShimDir, 0o700); mkErr != nil {
+			_ = cs.Stop()
 			_ = bk.Destroy(envID)
 			_ = os.RemoveAll(runDir.Path)
 			return fmt.Errorf("ai-env run: create shim dir: %w", mkErr)
@@ -388,6 +392,7 @@ func RunRun(opts RunOptions) error {
 
 	supervisor, sErr := run.NewSupervisor(superOpts)
 	if sErr != nil {
+		_ = cs.Stop()
 		_ = bk.Destroy(envID)
 		_ = os.RemoveAll(runDir.Path)
 		return fmt.Errorf("ai-env run: %w", sErr)
@@ -410,6 +415,25 @@ func RunRun(opts RunOptions) error {
 		return fmt.Errorf("ai-env run: terminal state %s (exit %d)", result.FinalState, result.ExitCode)
 	}
 	return nil
+}
+
+// credentialModeForRecord maps the launcher's chosen credential mode
+// string into the run-package's ModelCredentialMode value the supervisor
+// records in run.json. The agents package emits "brokered" as a synonym
+// for backend_managed at runtime (no broker integration is wired into
+// launchers yet); we collapse it here so audit consumers see one of the
+// three canonical record values and never an unknown literal.
+func credentialModeForRecord(mode string) run.ModelCredentialMode {
+	switch mode {
+	case "", agents.CredentialModeBackendManaged, agents.CredentialModeBrokered:
+		return run.ModelCredentialBackendManaged
+	case agents.CredentialModeProviderProxy:
+		return run.ModelCredentialProviderProxy
+	case agents.CredentialModeRawEnvExplicit:
+		return run.ModelCredentialRawEnvExplicit
+	default:
+		return run.ModelCredentialBackendManaged
+	}
 }
 
 // selectBackend constructs the primary backend, probes its
