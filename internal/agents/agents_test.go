@@ -646,6 +646,64 @@ func TestResolveCredentialMode_FailClosedWithTrace(t *testing.T) {
 	}
 }
 
+// TestResolveCredentialMode_BrokeredSelectsWhenBackendManaged confirms
+// the runtime accepts brokered (the default-scaffold mode) without
+// regressing to ErrUnknownCredentialMode. Doctor already reports PASS
+// for brokered; this pins the runtime to match so `ai-env run` works
+// against a freshly scaffolded project.
+func TestResolveCredentialMode_BrokeredSelectsWhenBackendManaged(t *testing.T) {
+	t.Parallel()
+
+	contract := config.AgentCredentialMode{
+		Default:       CredentialModeBrokered,
+		FallbackOrder: []string{CredentialModeRawEnvExplicit},
+	}
+	probe := EnvironmentProbe{BackendManaged: true}
+	res, err := ResolveCredentialModeDetailed(contract, probe, false)
+	if err != nil {
+		t.Fatalf("err = %v, want nil", err)
+	}
+	if res.Mode != CredentialModeBrokered {
+		t.Errorf("Mode = %q, want %q", res.Mode, CredentialModeBrokered)
+	}
+	if res.InjectedEnv != nil {
+		t.Errorf("InjectedEnv = %v, want nil (backend brokers credential)", res.InjectedEnv)
+	}
+	if res.RequiresWarning {
+		t.Errorf("RequiresWarning = true, want false for brokered")
+	}
+}
+
+// TestResolveCredentialMode_BrokeredFallsThroughWhenNoBackend confirms
+// brokered defers to the next mode in FallbackOrder when the backend
+// does not advertise managed credentials.
+func TestResolveCredentialMode_BrokeredFallsThroughWhenNoBackend(t *testing.T) {
+	t.Parallel()
+
+	contract := config.AgentCredentialMode{
+		Default:       CredentialModeBrokered,
+		FallbackOrder: []string{CredentialModeBackendManaged},
+	}
+	probe := EnvironmentProbe{BackendManaged: false}
+	_, err := ResolveCredentialModeDetailed(contract, probe, false)
+	if err == nil {
+		t.Fatalf("err = nil, want fail-closed when neither mode satisfies")
+	}
+	if !errors.Is(err, ErrCredentialModeUnavailable) {
+		t.Errorf("err = %v, want it to wrap ErrCredentialModeUnavailable", err)
+	}
+	var resErr *CredentialResolutionError
+	if !errors.As(err, &resErr) {
+		t.Fatalf("err = %T, want *CredentialResolutionError", err)
+	}
+	if len(resErr.Considered) != 2 {
+		t.Fatalf("considered = %d, want 2 entries (brokered + backend_managed)", len(resErr.Considered))
+	}
+	if resErr.Considered[0].Mode != CredentialModeBrokered {
+		t.Errorf("first attempt = %q, want %q (preserved order)", resErr.Considered[0].Mode, CredentialModeBrokered)
+	}
+}
+
 // TestResolveCredentialMode_UnknownModeFailsClosed protects against
 // silent typos in agents.yaml.
 func TestResolveCredentialMode_UnknownModeFailsClosed(t *testing.T) {

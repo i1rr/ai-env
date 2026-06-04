@@ -49,9 +49,79 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(newMCPCmd())
 	root.AddCommand(newLeaksCmd())
 	root.AddCommand(newDoctorCmd())
+	root.AddCommand(newRunCmd())
 	root.AddCommand(newShimHelperCmd())
 
 	return root
+}
+
+// newRunCmd builds the `ai-env run` subcommand. The Cobra layer parses
+// the positional <env-name> argument and the run-control flags
+// (--agent, --task, --continue, --shell-shim, --observer-mode); the
+// command body lives in internal/cli.RunRun so it can be unit-tested
+// against the mock backend without standing up a real container
+// runtime.
+func newRunCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "run <env-name> --task \"...\" [--agent <agent>] [flags]",
+		Short: "Launch an agent against an env's workspace inside the sandbox",
+		Long: "Launch an agent against an env's workspace inside the " +
+			"configured sandbox backend. The supervisor wires the " +
+			"per-run control socket, provider proxies (when " +
+			"secrets.local.yaml is populated), egress observer, MCP " +
+			"gateway, and the chosen agent launcher, then drives the " +
+			"agent through the canonical lifecycle " +
+			"(preparing_workspace -> starting_backend -> applying_policy " +
+			"-> starting_agent -> running -> stopping -> scanning -> " +
+			"reporting -> completed). --task is the prompt body fed to " +
+			"the agent via stdin and recorded verbatim in task.md; " +
+			"--agent overrides ai-env.yaml's project.default_agent; " +
+			"--continue links this run to the env's most recent run so " +
+			"the supervisor records a non-empty linked_previous_run on " +
+			"the new run.json; --shell-shim enables the optional " +
+			"shell-shim prototype (Plan §5.5 step 10); --observer-mode " +
+			"picks the egress observer policy (auto / strict / " +
+			"disabled).",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			agentName, err := cmd.Flags().GetString("agent")
+			if err != nil {
+				return fmt.Errorf("ai-env run: read --agent: %w", err)
+			}
+			task, err := cmd.Flags().GetString("task")
+			if err != nil {
+				return fmt.Errorf("ai-env run: read --task: %w", err)
+			}
+			cont, err := cmd.Flags().GetBool("continue")
+			if err != nil {
+				return fmt.Errorf("ai-env run: read --continue: %w", err)
+			}
+			shim, err := cmd.Flags().GetBool("shell-shim")
+			if err != nil {
+				return fmt.Errorf("ai-env run: read --shell-shim: %w", err)
+			}
+			observer, err := cmd.Flags().GetString("observer-mode")
+			if err != nil {
+				return fmt.Errorf("ai-env run: read --observer-mode: %w", err)
+			}
+			return cli.RunRun(cli.RunOptions{
+				EnvName:      args[0],
+				Agent:        agentName,
+				Task:         task,
+				Continue:     cont,
+				ShellShim:    shim,
+				ObserverMode: observer,
+				Stdout:       cmd.OutOrStdout(),
+				Stderr:       cmd.ErrOrStderr(),
+			})
+		},
+	}
+	cmd.Flags().String("agent", "", "Agent identifier to launch (defaults to project.default_agent from ai-env.yaml)")
+	cmd.Flags().String("task", "", "Verbatim task prompt body forwarded to the agent via stdin (required unless --continue is set, in which case the previous run's task.md is inherited)")
+	cmd.Flags().Bool("continue", false, "Link this run to the env's most recent previous run via run.json.linked_previous_run; if --task is empty, the previous run's task.md is reused")
+	cmd.Flags().Bool("shell-shim", false, "Wire the optional shell-shim prototype that intercepts in-sandbox shell invocations (Plan §5.5 step 10)")
+	cmd.Flags().String("observer-mode", "auto", "Egress observer policy: auto (best-effort, degrade on capability misses) or disabled (skip the observer entirely). 'strict' is reserved for a future release that wires the concrete egress.ChooseObserver and is rejected today.")
+	return cmd
 }
 
 // newDoctorCmd builds the `ai-env doctor` subcommand (plan Batch

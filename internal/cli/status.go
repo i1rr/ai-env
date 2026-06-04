@@ -102,7 +102,13 @@ func RunStatus(opts StatusOptions) error {
 			fmt.Fprintf(opts.Stdout, "env:       %s\n", opts.EnvName)
 			fmt.Fprintln(opts.Stdout, "runs:      (none recorded yet)")
 			fmt.Fprintln(opts.Stdout, "")
-			fmt.Fprintln(opts.Stdout, "Start one with `ai-env run "+opts.EnvName+" --agent <agent> --task \"...\"`.")
+			// Hint mirrors the cobra Use of `ai-env run` (cmd/ai-env/main.go
+			// newRunCmd): --task is required, --agent is optional and
+			// defaults to project.default_agent from ai-env.yaml, --continue
+			// links to the env's previous run. The less common --shell-shim
+			// and --observer-mode knobs are documented via `ai-env run -h`.
+			fmt.Fprintln(opts.Stdout, "Start one with `ai-env run "+opts.EnvName+" --task \"...\" [--agent <agent>] [--continue]`.")
+			fmt.Fprintln(opts.Stdout, "See `ai-env run -h` for --shell-shim and --observer-mode.")
 			return nil
 		}
 		return fmt.Errorf("ai-env status: %w", err)

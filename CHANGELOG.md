@@ -3,6 +3,56 @@
 This file records material changes to `ai-env`. Operator-facing
 references live under `docs/`; this file is the chronological summary.
 
+## Wire up `ai-env run` plus four CLI UX fixes
+
+This drop wires the user-facing `ai-env run` subcommand that was
+previously tracked as "lands in a later plan" and zeroes out four
+known UX defects in the surrounding CLI surface.
+
+### Added
+
+- `internal/cli/run.go` and `cmd/ai-env/main.go::newRunCmd`:
+  `ai-env run <env-name> --task "..." [--agent <agent>] [--continue]
+  [--shell-shim] [--observer-mode auto|strict|disabled]`. The command
+  resolves the project's `.ai-env/` root, loads `ai-env.yaml`,
+  reads workspace metadata via `workspace.MetadataPath`, builds the
+  multi-provider `ProviderProxy` from `secrets.local.yaml`, opens the
+  optional `GitHubBroker` (skipped on `ErrNoTokenSource`), selects the
+  backend per `sandbox.backend` with `sandbox.fallback_backend`
+  failover, materializes the per-run control socket, plans the agent
+  command via the registered launcher (Claude or Codex), drives the
+  supervisor through the canonical lifecycle, and maps the
+  `SupervisorResult.FinalState` to a stable exit code. On
+  `--continue` the previous run's id is recorded as
+  `run.json.linked_previous_run`. Unit tests in
+  `internal/cli/run_test.go` cover flag validation, unknown env name,
+  the happy path against `internal/backend/mock`, the
+  `sandbox.fallback_backend` failover, and the `--continue` linkage.
+
+### Fixed
+
+- `internal/cli/agents.go::evaluateCredentialMode` no longer reports
+  `FAIL (unknown mode)` for the `brokered` credential mode. The check
+  now returns `PASS — brokered (validated at run time)`, matching
+  `backend_managed`; the supervisor still enforces the real
+  fail-closed check at run time.
+- `internal/cli/list.go::readWorkspaceEntry` falls back to
+  `.env-meta.json` when a workspace directory has no `ai-env.yaml`
+  (the canonical case after `ai-env new`). The `STRATEGY` and
+  `TEMPLATE` columns are populated from the metadata; the stale
+  `workspace has no ai-env.yaml` warning is suppressed when the
+  metadata file is present and re-worded to `no ai-env.yaml or
+  .env-meta.json` when both are missing.
+- `internal/cli/status.go::RunStatus`'s "no runs yet" hint now
+  matches the shipped `ai-env run` Usage exactly, including the
+  optional `--shell-shim` and `--observer-mode` flags, so the
+  one-shot status output no longer points the operator at an
+  inaccurate invocation.
+- Removed the stale `plans/README.md` index that referenced
+  non-existent `plan_v3_1.md` / `plan_01_foundation.md`. The
+  canonical plan archive lives under `archive/plan_01_cli.md` …
+  `archive/plan_10_leak_coverage_hardening.md`.
+
 ## Leak-coverage hardening (plan 10)
 
 This drop wires every "wire" and "instrument" and "tighten"
