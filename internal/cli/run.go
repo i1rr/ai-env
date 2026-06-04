@@ -178,7 +178,15 @@ func RunRun(opts RunOptions) error {
 		}
 		opts.Cwd = cwd
 	}
-	if strings.TrimSpace(opts.Task) == "" {
+	// --task is required for a fresh run because there is no previous task
+	// to inherit. With --continue, the supervisor's PrepareContinuation
+	// falls back to the previous run's task.md when --task is empty (the
+	// documented "resume with the same instructions" path); only when the
+	// predecessor also has no recorded task does PrepareContinuation
+	// itself surface an error pointing at --task. Reproducing the gate
+	// here for the non-continue case keeps the diagnostic close to the
+	// flag definition.
+	if !opts.Continue && strings.TrimSpace(opts.Task) == "" {
 		return errors.New("ai-env run: --task is required")
 	}
 	if err := ValidateEnvName(opts.EnvName); err != nil {
@@ -290,16 +298,6 @@ func RunRun(opts RunOptions) error {
 		envProbe.ProviderProxyProvider = proxyBuild.Proxies[0].Provider()
 	}
 
-	plan, err := RunAgentPlanner(context.Background(), agentName, contract, agents.Request{
-		Mode:           "autonomous",
-		TaskBody:       opts.Task,
-		WorkspaceDir:   wsPath,
-		CredentialMode: contract.CredentialMode,
-	}, envProbe)
-	if err != nil {
-		return fmt.Errorf("ai-env run: plan agent %q: %w", agentName, err)
-	}
-
 	envID, err := bk.Create(backend.EnvSpec{
 		Name:          opts.EnvName,
 		Template:      cfg.Sandbox.Template,
@@ -309,6 +307,14 @@ func RunRun(opts RunOptions) error {
 		return fmt.Errorf("ai-env run: backend.Create: %w", err)
 	}
 
+	// effectiveTask is the task body that ultimately ends up in task.md,
+	// in run.json's Task field, and in the agent's stdin. For a fresh
+	// run it is opts.Task verbatim. For a --continue run with an empty
+	// --task, PrepareContinuation falls back to the previous run's task
+	// body (the documented "resume with the same instructions" path);
+	// we mirror that resolution here so the planner and supervisor see
+	// the same body that was written to disk.
+	effectiveTask := opts.Task
 	var (
 		runID      string
 		runDir     run.RunDirectory
@@ -323,6 +329,9 @@ func RunRun(opts RunOptions) error {
 		runID = cont.NewRun.ID
 		runDir = cont.NewRun
 		linkedPrev = run.LinkedPreviousRunPtr(cont.PreviousRunID)
+		if cont.TaskSource == run.TaskSourceInherited {
+			effectiveTask = cont.PreviousRecord.Task
+		}
 	} else {
 		newID, idErr := run.GenerateRunID()
 		if idErr != nil {
@@ -343,6 +352,18 @@ func RunRun(opts RunOptions) error {
 		runDir = newDir
 	}
 
+	plan, err := RunAgentPlanner(context.Background(), agentName, contract, agents.Request{
+		Mode:           "autonomous",
+		TaskBody:       effectiveTask,
+		WorkspaceDir:   wsPath,
+		CredentialMode: contract.CredentialMode,
+	}, envProbe)
+	if err != nil {
+		_ = bk.Destroy(envID)
+		_ = os.RemoveAll(runDir.Path)
+		return fmt.Errorf("ai-env run: plan agent %q: %w", agentName, err)
+	}
+
 	cs, csErr := run.NewControlSocket(run.ControlSocketOptions{RunDir: runDir.Path})
 	if csErr != nil {
 		_ = bk.Destroy(envID)
@@ -354,7 +375,7 @@ func RunRun(opts RunOptions) error {
 		RunDir:              runDir.Path,
 		RunID:               runID,
 		EnvName:             opts.EnvName,
-		Task:                opts.Task,
+		Task:                effectiveTask,
 		Backend:             backendName,
 		Agent:               agentName,
 		Command:             run.CommandSpec(plan.Command),

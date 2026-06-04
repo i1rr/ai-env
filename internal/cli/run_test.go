@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -324,6 +325,73 @@ func TestRunRun_Continue_LinksPreviousRun(t *testing.T) {
 	}
 }
 
+// TestRunRun_Continue_InheritsTaskWhenEmpty pins the documented
+// "resume with the same instructions" path: --continue without --task
+// must reach PrepareContinuation, which falls back to the previous
+// run's task.md body. The CLI gate that requires --task for fresh runs
+// must not fire when --continue is set.
+func TestRunRun_Continue_InheritsTaskWhenEmpty(t *testing.T) {
+	withRunSeams(t, mockBackendFactory, noopPlanner)
+
+	cwd := shortTempDir(t)
+	if err := RunNew(NewOptions{EnvName: "demo", Cwd: cwd, Stdout: &bytes.Buffer{}}); err != nil {
+		t.Fatalf("RunNew: %v", err)
+	}
+
+	if err := RunRun(RunOptions{
+		EnvName: "demo",
+		Agent:   "claude",
+		Task:    "original instructions",
+		Cwd:     cwd,
+		Stdout:  &bytes.Buffer{},
+		Stderr:  &bytes.Buffer{},
+	}); err != nil {
+		t.Fatalf("first RunRun: %v", err)
+	}
+
+	aiEnvDir := filepath.Join(cwd, ".ai-env")
+	first, err := run.LatestRunForEnv(aiEnvDir, "demo")
+	if err != nil {
+		t.Fatalf("LatestRunForEnv: %v", err)
+	}
+	firstRec, recErr := run.ReadRecord(first.Path)
+	if recErr != nil {
+		t.Fatalf("ReadRecord first: %v", recErr)
+	}
+	firstRec.State = run.StateKilledByUser
+	if err := run.WriteRecord(first.Path, firstRec); err != nil {
+		t.Fatalf("WriteRecord first: %v", err)
+	}
+
+	time.Sleep(1100 * time.Millisecond)
+
+	// Empty --task with --continue: must succeed by inheriting the
+	// previous run's task body.
+	if err := RunRun(RunOptions{
+		EnvName:  "demo",
+		Agent:    "claude",
+		Task:     "",
+		Continue: true,
+		Cwd:      cwd,
+		Stdout:   &bytes.Buffer{},
+		Stderr:   &bytes.Buffer{},
+	}); err != nil {
+		t.Fatalf("RunRun --continue with empty --task: %v", err)
+	}
+
+	second, err := run.LatestRunForEnv(aiEnvDir, "demo")
+	if err != nil {
+		t.Fatalf("LatestRunForEnv after continue: %v", err)
+	}
+	taskBody, err := os.ReadFile(run.TaskPath(aiEnvDir, second.ID))
+	if err != nil {
+		t.Fatalf("read inherited task.md: %v", err)
+	}
+	if !strings.Contains(string(taskBody), "original instructions") {
+		t.Errorf("inherited task.md = %q, want it to contain the previous task body", string(taskBody))
+	}
+}
+
 // TestRunRun_Continue_RejectsNonContinuableTerminal pins the new
 // gate: when the previous run ended in StateCompleted (or any other
 // non-continuable terminal), `--continue` must refuse rather than
@@ -447,16 +515,24 @@ func TestCredentialModeForRecord(t *testing.T) {
 
 // patchAIEnvFallback rewrites the sandbox.fallback_backend value in
 // the generated ai-env.yaml so the fallback test can point at the
-// in-memory mock without editing the production defaults.
+// in-memory mock without editing the production defaults. Returns an
+// error when neither the bare nor the quoted "none" pattern matched —
+// without that guard, a YAML emitter change would silently produce a
+// no-op write and the fallback test would assert a "fallback used"
+// outcome against the unpatched default.
 func patchAIEnvFallback(path, fallback string) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return err
 	}
-	updated := strings.Replace(string(data), "fallback_backend: none", "fallback_backend: "+fallback, 1)
-	if updated == string(data) {
+	original := string(data)
+	updated := strings.Replace(original, "fallback_backend: none", "fallback_backend: "+fallback, 1)
+	if updated == original {
 		// Some YAML dumpers quote "none"; tolerate both shapes.
-		updated = strings.Replace(string(data), "fallback_backend: \"none\"", "fallback_backend: "+fallback, 1)
+		updated = strings.Replace(original, "fallback_backend: \"none\"", "fallback_backend: "+fallback, 1)
+	}
+	if updated == original {
+		return fmt.Errorf("patchAIEnvFallback: no fallback_backend: none|\"none\" line found in %s", path)
 	}
 	return os.WriteFile(path, []byte(updated), 0o644)
 }

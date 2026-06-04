@@ -117,11 +117,10 @@ func newRunCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().String("agent", "", "Agent identifier to launch (defaults to project.default_agent from ai-env.yaml)")
-	cmd.Flags().String("task", "", "Verbatim task prompt body forwarded to the agent via stdin (required)")
-	cmd.Flags().Bool("continue", false, "Link this run to the env's most recent previous run via run.json.linked_previous_run")
+	cmd.Flags().String("task", "", "Verbatim task prompt body forwarded to the agent via stdin (required unless --continue is set, in which case the previous run's task.md is inherited)")
+	cmd.Flags().Bool("continue", false, "Link this run to the env's most recent previous run via run.json.linked_previous_run; if --task is empty, the previous run's task.md is reused")
 	cmd.Flags().Bool("shell-shim", false, "Wire the optional shell-shim prototype that intercepts in-sandbox shell invocations (Plan §5.5 step 10)")
 	cmd.Flags().String("observer-mode", "auto", "Egress observer policy: auto (best-effort, degrade on capability misses) or disabled (skip the observer entirely). 'strict' is reserved for a future release that wires the concrete egress.ChooseObserver and is rejected today.")
-	_ = cmd.MarkFlagRequired("task")
 	return cmd
 }
 

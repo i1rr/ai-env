@@ -32,9 +32,22 @@ func TestRunList_NoEnvs(t *testing.T) {
 	if !strings.Contains(s, "NAME") || !strings.Contains(s, "LAST RUN") {
 		t.Errorf("expected table header in listing:\n%s", s)
 	}
-	// LAST RUN cell should be "-" for a workspace with no runs.
-	if !strings.Contains(s, "-") {
-		t.Errorf("expected '-' in LAST RUN column:\n%s", s)
+	// LAST RUN cell should be "-" for a workspace with no runs. A bare
+	// strings.Contains(s, "-") would match the tempdir path that the
+	// table also prints, so we walk the rows and assert specifically
+	// on the placeholder row's trailing cell.
+	var placeholderRow string
+	for _, line := range strings.Split(s, "\n") {
+		if strings.HasPrefix(line, "placeholder") {
+			placeholderRow = line
+			break
+		}
+	}
+	if placeholderRow == "" {
+		t.Fatalf("placeholder row missing from listing:\n%s", s)
+	}
+	if !strings.HasSuffix(strings.TrimRight(placeholderRow, " "), "-") {
+		t.Errorf("placeholder row should end with '-' LAST RUN cell, got %q", placeholderRow)
 	}
 }
 
